@@ -1,3 +1,4 @@
+import math
 import time
 import threading
 import asyncio
@@ -207,12 +208,10 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         """Отправка заявки (транзакции) на биржу"""
         class_code = order.data.class_code
         sec_code = order.data.sec_code
-        # Размер позиции в лотах.
-        if order.data.derivative:
-            quantity = abs(order.size)  # Для деривативов размер позиции уже в штуках
-            order.size = await self.store._lots_to_size(class_code, sec_code, order.size)
-        else:
-            quantity = abs(await self.store._size_to_lots(class_code, sec_code, order.size))
+        quantity = abs(order.size)
+        if self.store.p.lots:
+            quantity = await self.store._size_to_lots(class_code, sec_code, quantity)
+            order.size = math.copysign(await self.store._lots_to_size(class_code, sec_code, quantity), order.size)
 
         trans_id = int(time.time() * 1000) % 100000000  # time in milliseconds
         order.info["trans_id"] = trans_id
