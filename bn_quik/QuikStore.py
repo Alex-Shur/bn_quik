@@ -137,14 +137,10 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         ('futures_firm_id', "SPBFUT"),  # Идентификатор фирмы для фьючерсов
         ('edp', False),  # Единая денежная позиция
         ('slippage_steps', 10),  # Кол-во шагов цены для проскальзывания
-        #('clientId', None),  # None generates a random clientid 1 -> 2^16
         #('notifyall', False),
         #('_debug', False),
         # ('reconnect', 3),  # -1 forever, 0 No, > 0 number of retries
         # ('timeout', 3.0),  # timeout between reconnections
-        #('timeoffset', True),  # Use offset to server for timestamps if needed
-        #('timerefresh', 60.0),  # How often to refresh the timeoffset
-        #('indcash', True),  # Treat IND codes as CASH elements
     )
 
     @classmethod
@@ -263,8 +259,8 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         self.quik_api.events.remove_on_disconnected(self._on_disconnected)
         self.quik_api.events.remove_on_trans_reply(self._on_transaction_reply)
         self.quik_api.events.remove_on_trans_reply(self._on_trade)
-        self.quik_api.events.remove_on_order(self._on_order)
-        self.quik_api.events.remove_on_stop_order(self._on_stop_order)
+        # self.quik_api.events.remove_on_order(self._on_order)
+        # self.quik_api.events.remove_on_stop_order(self._on_stop_order)
 
         self.logger.info("Stopping QUIK async loop...")
         self._stop_event.set()  # Устанавливаем флаг остановки
@@ -307,8 +303,8 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.quik_api.events.add_on_disconnected(self._on_disconnected)
             self.quik_api.events.add_on_trans_reply(self._on_transaction_reply)
             self.quik_api.events.add_on_trade(self._on_trade)
-            self.quik_api.events.add_on_order(self._on_order)
-            self.quik_api.events.add_on_stop_order(self._on_stop_order)
+            # self.quik_api.events.add_on_order(self._on_order)
+            # self.quik_api.events.add_on_stop_order(self._on_stop_order)
 
         except Exception as e:
             self.logger.error("Ошибка подключения: %s", e)
