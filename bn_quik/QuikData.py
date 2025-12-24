@@ -56,6 +56,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         self.dt_last_open = datetime.min  # Дата и время открытия последнего полученного бара
         self.last_bar_received = False  # Получен последний бар
         self.live_mode = False  # Режим получения баров. False = История, True = Новые бары
+        self.info = {}
 
     def setenvironment(self, env):
         """Добавление хранилища QUIK в cerebro"""
@@ -69,6 +70,9 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         if self.p.live_bars:  # Если получаем историю и новые бары
             if not self.store._is_subscribed_to_candles(self.class_code, self.sec_code, self.candle_interval):
                 self.store._subscribe_to_candles(self.class_code, self.sec_code, self.candle_interval)  # Подписываемся на новые бары
+        tinfo = self.store._get_ticker_info(self.class_code, self.sec_code)
+        if tinfo is not None:
+            self.info = tinfo.to_dict()
 
         cur_datetime = self.store._get_quik_datetime_now()
         self.put_notification(self.DELAYED)  # Отправляем уведомление об отправке исторических (не новых) баров
@@ -108,7 +112,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
                     self.logger.debug('Удаление дожи 4-х цен: %d бар(ов)', doji_count)
                     candles = candles[~mask_doji]
             # фильтруем по времени окончания бара
-            candles["dtclose"] = [self.get_bar_close_date_time(idx) for idx in candles.index]
+            candles["dtclose"] = [self.__get_bar_close_date_time(idx) for idx in candles.index]
             dt_quik_now = self.store._get_quik_datetime_now() +timedelta(seconds=self.delta)
             mask_close = candles["dtclose"] <= dt_quik_now
             candles = candles[mask_close]
@@ -254,7 +258,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
             self.dt_last_open = dt_open
             return False
 
-        dt_close = self.get_bar_close_date_time(dt_open)  # Дата и время закрытия бара
+        dt_close = self.__get_bar_close_date_time(dt_open)  # Дата и время закрытия бара
         dt_market_now = self.store._get_quik_datetime_now()  # Datetime из QUIK
         dt_market_now_corrected = dt_market_now + timedelta(seconds=self.delta)
         # Если время закрытия бара еще не наступило на бирже, и сессия еще не закончилась
@@ -266,7 +270,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         return True
 
 
-    def get_bar_close_date_time(self, dt_open):
+    def __get_bar_close_date_time(self, dt_open):
         """Дата и время закрытия бара"""
         if self.p.timeframe == TimeFrame.Days:
             return dt_open + timedelta(days=1)
