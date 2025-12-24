@@ -442,6 +442,11 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                 self._ticker_info[key] = None
                 return None
 
+    def _get_ticker_info_sync(self, class_code: str, sec_code: str) -> dict:
+        """Синхронное получение информации о тикере из QUIK"""
+        info = self.__class__.run_sync(self._get_ticker_info(class_code, sec_code))
+        return info.to_dict() if info else {}
+    
     async def _is_ucp_client(self, firm_id: str, client_code: str) -> bool:
         """Проверка, является ли клиент участником единой денежной позиции (УДП)"""
         self.logger.debug("Checking if client %s.%s is UCP", firm_id, client_code)

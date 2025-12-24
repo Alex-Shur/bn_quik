@@ -372,7 +372,6 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             # - Вы не можете снять данную заявку
             # - Превышен лимит отправки транзакций для данного логина
             if status in (4, 5):
-                self.logger.debug('on_trans_reply: Заявка %s. Ошибка. Выход', order.ref)
                 self.logger.error('on_trans_reply: Заявка %s. Ошибка. Выход', order.ref)
                 order.addinfo(op='error')
                 return  # то заявку не отменяем, выходим, дальше не продолжаем
@@ -419,9 +418,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         self.logger.debug('on_trade: Заявка %s с номером %s. Номер транзакции %s. Номер сделки %s order=%s', order.ref, order_num, trans_id, trade_num, order)
         class_code = qk_trade.class_code  # Код режима торгов
         sec_code = qk_trade.sec_code  # Код тикера
-
         dataname = self.store._get_ticker_name(class_code, sec_code)
-
         # Защита от дублей сделок (критичная секция - check-then-act)
         # Используем asyncio.Lock для оптимальной работы в async контексте
         async with self._lock_trades:
@@ -438,18 +435,11 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         if qk_trade.flags & OrderTradeFlags.IS_SELL.value:
             size *= -1  # Продажа - кол-во ставим отрицательным
         price = float(qk_trade.price) # Цена сделки
-        self.logger.debug('on_trade: Заявка %s. size=%s, price=%s', order.ref, size, price)
-        try:
-            with self.store._lock_store_data:
-                dt = order.data.datetime[0]  # Дата и время исполнения заявки. Последняя известная
-            self.logger.debug('on_trade: Заявка %s. Дата/время исполнения заявки по бару %s', order.ref, dt)
-        except (KeyError, IndexError) as e:  # При ошибке
-            self.logger.error('on_trade: Exception for get datetime of order: %s', e)
-            dt = datetime.now(self.store.tz_msk)
-            self.logger.debug('on_trade: Заявка %s. Дата/время исполнения заявки по текущему %s', order.ref, dt)
-
+        dt = qk_trade.datetime.to_datetime()
+        self.logger.debug('on_trade: Заявка %s. size=%s, price=%s datetime=%s', order.ref, size, price, dt)
         position = self.getposition(order.data)  # Получаем позицию по тикеру или нулевую позицию если тикера в списке позиций нет
         psize, pprice, opened, closed = position.update(size, price)  # Обновляем размер/цену позиции на размер/цену сделки
+        dt = order.data.date2num(dt)
         with self._lock_orders:
             order.execute(dt, size, price, closed, 0, 0, opened, 0, 0, 0, 0, psize, pprice)  # Исполняем заявку в BackTrader
         if order.executed.remsize:  # Если заявка исполнена частично (осталось что-то к исполнению)

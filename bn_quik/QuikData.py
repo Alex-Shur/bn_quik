@@ -70,9 +70,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         if self.p.live_bars:  # Если получаем историю и новые бары
             if not self.store._is_subscribed_to_candles(self.class_code, self.sec_code, self.candle_interval):
                 self.store._subscribe_to_candles(self.class_code, self.sec_code, self.candle_interval)  # Подписываемся на новые бары
-        tinfo = self.store._get_ticker_info(self.class_code, self.sec_code)
-        if tinfo is not None:
-            self.info = tinfo.to_dict()
+        self.info = self.store._get_ticker_info_sync(self.class_code, self.sec_code)
 
         cur_datetime = self.store._get_quik_datetime_now()
         self.put_notification(self.DELAYED)  # Отправляем уведомление об отправке исторических (не новых) баров
@@ -145,6 +143,10 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         if len(self.store.datas) == 0:
             self.store.stop()
 
+    def load(self):
+        with self.store._lock_store_data:
+            return super().load()
+
     def _load(self):
         """Загрузка бара из истории или нового бара"""
         if self.hist_candles_pos < len(self.hist_candles):
@@ -178,14 +180,13 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
                 self.put_notification(self.DELAYED)
                 self.live_mode = False
 
-        with self.store._lock_store_data:
-            self.lines.datetime[0] = date2num(bar['datetime'])  # Переводим в формат хранения даты/времени в BackTrader
-            self.lines.open[0] = bar['open']
-            self.lines.high[0] = bar['high']
-            self.lines.low[0] = bar['low']
-            self.lines.close[0] = bar['close']
-            self.lines.volume[0] = int(bar['volume'])
-            self.lines.openinterest[0] = 0
+        self.lines.datetime[0] = date2num(bar['datetime'])  # Переводим в формат хранения даты/времени в BackTrader
+        self.lines.open[0] = bar['open']
+        self.lines.high[0] = bar['high']
+        self.lines.low[0] = bar['low']
+        self.lines.close[0] = bar['close']
+        self.lines.volume[0] = int(bar['volume'])
+        self.lines.openinterest[0] = 0
         return True
 
     def _on_new_candle(self, candle):
