@@ -30,7 +30,6 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         ('live_bars', False),  # False - только история, True - история и новые бары
         ('count', 2000),
     )
-    datapath = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'DataQuik', '')  # Путь сохранения файла истории
     delimiter = ';'
     dt_format = '%Y-%m-%d %H:%M:%S'
     sleep_time_sec = 0.01  # Время ожидания в секундах (10 мс), если не пришел новый бар. Для снижения нагрузки/энергопотребления процессора
@@ -44,12 +43,12 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
     def __init__(self, **kwargs):
         self.store = QuikStore(**kwargs)  # Хранилище QUIK
         self.class_code, self.sec_code = self.store.__class__.run_sync(self.store._parse_ticker_name(self.p.dataname))
-        tf = self.store._bt_timeframe_to_str(self.p.timeframe, self.p.compression)
-        self._data_id = f'{self.class_code}.{self.sec_code}_{tf}'
+        # tf = self.store._bt_timeframe_to_str(self.p.timeframe, self.p.compression)
+        self.candle_interval = self.store._bt_timeframe_2_quik(self.p.timeframe, self.p.compression)
+        self._data_id = self.store._get_data_id(self.class_code, self.sec_code, self.candle_interval)
         self.logger = logging.getLogger(f'QuikData.{self._data_id}')
         self.derivative = False # Для деривативов не используем конвертацию цен и кол-ва
-        self.candle_interval = self.store._bt_timeframe_2_quik(self.p.timeframe, self.p.compression)
-        self.file_name = f'{self.datapath}{self._data_id}.csv'  # Полное имя файла истории
+        self.file_name = f'{self.store.data_path}{self._data_id}.csv'  # Полное имя файла истории
         self.hist_candles = pd.DataFrame()
         self.hist_candles_pos = 0  # Позиция текущего бара в исторических данных
         self._new_bars = queue.Queue()
@@ -57,6 +56,10 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         self.last_bar_received = False  # Получен последний бар
         self.live_mode = False  # Режим получения баров. False = История, True = Новые бары
         self.info = {}
+
+    @property
+    def data_id(self):
+        return self._data_id
 
     def setenvironment(self, env):
         """Добавление хранилища QUIK в cerebro"""
@@ -125,19 +128,19 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         self.hist_candles = candles
         self._save_bars_to_file(candles)  # Сохраняем полученные бары в файл истории
         if self.p.live_bars:  # Если получаем историю и новые бары
-            self.store._register_data(self, self.class_code, self.sec_code, self.candle_interval)
+            self.store._register_data(self)
 
 
     def stop(self):
         super(QuikData, self).stop()
         if self.p.live_bars:  # Если была подписка/расписание
             if self.store._is_subscribed_to_candles(self.class_code, self.sec_code, self.candle_interval):
-                self.logger.debug('Отмена подписки %s', self._data_id)
+                self.logger.debug('Отмена подписки %s', self.data_id)
                 self.store._unsubscribe_from_candles(self.class_code, self.sec_code, self.candle_interval)
             self.put_notification(self.DISCONNECTED)  # Отправляем уведомление об окончании получения новых бар
 
         # Отменяем регистрацию данных
-        self.store._unregister_data(self.class_code, self.sec_code, self.candle_interval)
+        self.store._unregister_data(self)
         self.store.DataCls = None  # Удаляем класс данных в хранилище
         # Останавливаем store если нет других активных подписок
         if len(self.store.datas) == 0:

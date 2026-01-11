@@ -137,6 +137,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         ('futures_firm_id', "SPBFUT"),  # Идентификатор фирмы для фьючерсов
         ('edp', False),  # Единая денежная позиция
         ('slippage_steps', 10),  # Кол-во шагов цены для проскальзывания
+        ('data_dir', 'DataQuik'),  # Каталог для хранения данных
         #('notifyall', False),
         #('_debug', False),
         # ('reconnect', 3),  # -1 forever, 0 No, > 0 number of retries
@@ -165,6 +166,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         self.qdata_last = defaultdict(QuikData)
         self.notifs = collections.deque()  # store notifications for cerebro
         self.tz_msk = timezone('Europe/Moscow')  # ВременнАя зона МСК
+        self.data_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', self.p.data_dir, '')  # Путь сохранения файла истории
 
         self.new_bars = []  # Новые бары по всем подпискам на тикеры из QUIK
 
@@ -315,8 +317,9 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
     def _on_new_candle(self, candle: Candle):
         """Callback for new candle events"""
         logging.debug("New candle received: %s.%s Interval: %s Time: %s", candle.class_code, candle.sec_code, candle.interval, candle.datetime.to_datetime())
+        data_id = self._get_data_id(candle.class_code, candle.sec_code, candle.interval)
         with self._lock_qdata:
-            qdata = self.qdata.get((candle.class_code, candle.sec_code, candle.interval))
+            qdata = self.qdata.get(data_id, None)
         if qdata is not None:
             qdata._on_new_candle(candle)
 
@@ -347,22 +350,29 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         if self.broker:
             await self.broker._on_trade(trade)
 
-    def _register_data(self, data, class_code: str, sec_code: str, interval: CandleInterval):
-        """Регистрация данных по тикеру и временному интервалу"""
+    def _get_data_by_id(self, data_id: str):
+        """Получение данных по тикеру и временному интервалу"""
         with self._lock_qdata:
-            if (class_code, sec_code, interval) not in self.qdata:
-                self.qdata[(class_code, sec_code, interval)] = data
-                v = self.qdata_last.get((class_code, sec_code, interval), None)
-                if (v is not None and interval < v.candle_interval) or v is None:
-                    self.qdata_last[(class_code, sec_code)] = data
-            else:
-                raise ValueError(f"Data for {class_code}.{sec_code} at interval {interval} already registered") 
+            return self.qdata.get(data_id, None)
 
-    def _unregister_data(self, class_code: str, sec_code: str, interval: CandleInterval):
-        """Убрать регистрацию данных по тикеру и временному интервалу"""
+    def _register_data(self, data):
+        """Регистрация данных по тикеру и временному интервалу"""
+        data_id = data.data_id
         with self._lock_qdata:
-            if (class_code, sec_code, interval) in self.qdata:
-                del self.qdata[(class_code, sec_code, interval)]
+            if data_id not in self.qdata:
+                self.qdata[data_id] = data
+                v = self.qdata_last.get(data_id, None)
+                if (v is not None and data.candle_interval < v.candle_interval) or v is None:
+                    self.qdata_last[(data.class_code, data.sec_code)] = data
+            else:
+                raise ValueError(f"Data for {data_id} already registered") 
+
+    def _unregister_data(self, data):
+        """Убрать регистрацию данных по тикеру и временному интервалу"""
+        data_id = data.data_id
+        with self._lock_qdata:
+            if data_id in self.qdata:
+                del self.qdata[data_id]
 
 
     def _subscribe_to_candles(self, class_code: str, sec_code: str, interval: CandleInterval)-> bool:
@@ -392,7 +402,6 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         except Exception as e:
             self.logger.error("Error checking subscription to candles: %s", e)
             return False
-
 
 
     def _get_last_candles(self, class_code: str, sec_code: str, interval: CandleInterval, count:int = 1000) -> pd.DataFrame | None:
@@ -496,6 +505,22 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         except Exception as e:
             self.logger.error("Error getting futures limits: %s", e)
             return None
+
+    async def _get_orders(self) -> list[Order]:
+        """Получение всех заявок из QUIK"""
+        try:
+            return await self.quik_api.orders.get_orders()
+        except Exception as e:
+            self.logger.error("Error getting orders: %s", e)
+            return []
+
+    async def _get_stop_orders(self) -> list[StopOrder]:
+        """Получение всех стоп-заявок из QUIK"""
+        try:
+            return await self.quik_api.stop_orders.get_stop_orders()
+        except Exception as e:
+            self.logger.error("Error getting stop orders: %s", e)
+            return []
 
     async def _get_order_by_number(self, order_num:int) -> Order | None:
         """Получение информации о заявке по её номеру"""
@@ -627,11 +652,11 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             return 'MN1'
         raise NotImplementedError
 
-    def _get_data_id(self, class_code: str, sec_code: str, tf: str) -> str:
+    def _get_data_id(self, class_code: str, sec_code: str, interval: CandleInterval) -> str:
         """
         Получение уникального идентификатора данных по тикеру и временному интервалу
         """
-        return f'{class_code}.{sec_code}_{tf}'
+        return f'{class_code}.{sec_code}_{interval.name}'
 
     async def _send_transaction(self, transaction) -> int:
         """Отправка транзакции в QUIK"""

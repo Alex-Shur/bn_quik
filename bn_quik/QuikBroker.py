@@ -1,4 +1,6 @@
+import json
 import math
+import os
 import time
 import threading
 import asyncio
@@ -12,7 +14,7 @@ from backtrader_next.position import Position
 from backtrader_next.utils.py3 import with_metaclass
 from quik_python.data_structures import Transaction, Trade, TransactionReply
 from quik_python.data_structures.money_limit_ex import MoneyLimitEx
-from quik_python.data_structures.order import OrderTradeFlags
+from quik_python.data_structures.order import OrderTradeFlags, State
 from quik_python.data_structures.portfolio_info_ex import PortfolioInfoEx
 from quik_python.data_structures.stop_order import StopOrder
 from quik_python.data_structures.transaction_types import TransactionAction, TransactionOperation, TransactionType
@@ -31,7 +33,6 @@ class MetaQuikBroker(BrokerBase.__class__):
 class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
     params = (
-        ('slippage_steps', 10),  # Кол-во шагов цены для проскальзывания
         ('client_code_for_orders', None),  # Номер торгового терминала. У брокера Финам требуется для совершения торговых операций
         ('trade_account_id', None),
     )
@@ -45,23 +46,22 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         self.notifs = deque()  # Очередь уведомлений брокера о заявках
         self.cash = 0.0  # текущие свободные средства
         self.value = 0.0  # текущая стоимость всех позиций + текущие свободне средства
-        self.trade_nums = {}  # Список номеров сделок по тикеру для фильтрации дублей сделок
-        self.orders = OrderedDict()  # Список заявок, отправленных на биржу
+        self.trade_nums = defaultdict(set)  # Список номеров сделок по тикеру для фильтрации дублей сделок
+        self.orders = {}  # Список заявок, отправленных на биржу
         self.ocos = {}  # Список связанных заявок (One Cancel Others)
         self.pcs = defaultdict(deque)  # Очередь всех родительских/дочерних заявок (Parent - Children)
         self._positions = defaultdict(Position)  ##!!
+        self._state_file = f'{self.store.data_path}state.json'
 
         # Thread synchronization locks для безопасности многопоточного доступа
         # Threading locks используются для данных с гибридным доступом
         # (sync методы из main thread + async методы из event loop thread).
         # Это безопасно, т.к. event loop работает в отдельном потоке (см. QuikStore.MetaSingleton).
-        
         self._lock_orders = threading.RLock()    # Гибридный: Sync(buy/sell/cancel) + Async(place_order/_on_trans_reply/_on_trade/cancel_order)
         self._lock_trades = None                 # Asyncio Lock: Только Async(_on_trade). Инициализируется в start()
         self._lock_notifs = threading.Lock()     # Гибридный: Sync(get_notification/next) + Async(_on_trans_reply/_on_trade)
         self._lock_cash = threading.Lock()       # Гибридный: Sync(getcash/getvalue) + Async(_getcash/_getvalue/_on_trade)
         self._lock_positions = threading.RLock() # Гибридный: Sync(getposition) + Async(_getvalue/_get_all_active_positions)
-        
         # Примечание: _lock_trades использует asyncio.Lock для оптимальной производительности в async коде.
         # Остальные блокировки используют threading.Lock т.к. доступ к данным происходит из разных потоков.
 
@@ -77,11 +77,11 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 self.logger.info(f"Account {self.account.trade_account_id} is UCP: {self.account.is_ucp}")
         return self.account
 
-    async def __start_a(self):
+    async def __start_async(self):
         # Инициализируем asyncio.Lock для _lock_trades в контексте event loop
         if self._lock_trades is None:
             self._lock_trades = asyncio.Lock()
-        
+
         self.store.broker = self
         self.account = await self.__get_account()
         if not self.account:
@@ -89,10 +89,11 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         await self._get_all_active_positions()
         self.cash = await self._getcash()
         self.value = await self._getvalue(None)
+        await self._load_all_orders()
 
     def start(self):
         super(QuikBroker, self).start()
-        self.store.__class__.run_sync(self.__start_a())
+        self.store.__class__.run_sync(self.__start_async())
 
     def stop(self):
         super(QuikBroker, self).stop()
@@ -215,6 +216,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
         trans_id = int(time.time() * 1000) % 100000000  # time in milliseconds
         order.info["trans_id"] = trans_id
+        order.info["data_id"] = order.data.data_id
 
         transaction = Transaction()
         transaction.TRANS_ID = trans_id
@@ -276,15 +278,17 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             transaction.EXPIRY_DATE = expiry_date  # Срок действия стоп заявки
 
         order.addinfo(op='new')
+        with self._lock_orders:
+            self.orders[trans_id] = order  # Сохраняем заявку в списке заявок, отправленных на биржу
+        self._save_broker_state()
         trans_id = await self.store._send_transaction(transaction)
         order.submit(self)  # Отправляем заявку на биржу (Order.Submitted)
+        self._save_broker_state()
         if trans_id < 0:  # Если возникла ошибка при постановке заявки на уровне QUIK
             self.logger.error('place_order: Ошибка отправки заявки в QUIK %s.%s  %s', class_code, sec_code, transaction.error_message)  # то заявка не отправляется на биржу, выводим сообщение об ошибке
             order.addinfo(op='error')
             order.reject(self)
-
-        with self._lock_orders:
-            self.orders[trans_id] = order  # Сохраняем заявку в списке заявок, отправленных на биржу
+            self._save_broker_state()
         return order
 
 
@@ -314,6 +318,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             transaction.ACTION = TransactionAction.KILL_ORDER
             transaction.ORDER_KEY = str(order_num)
         order.addinfo(op='cancel')
+        self._save_broker_state()
         await self.store._send_transaction(transaction)
         return order
 
@@ -353,6 +358,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 return
             order: Order = self.orders[trans_id]
         order.addinfo(order_num=order_num)
+        self._save_broker_state()
         self.logger.debug('on_trans_reply: Заявка %s с номером %s. Номер транзакции %s.', order.ref, order_num, trans_id)
         # result_msg = qk_trans_reply.result_msg.lower()
         status = qk_trans_reply.status  # Статус транзакции
@@ -374,6 +380,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             if status in (4, 5):
                 self.logger.error('on_trans_reply: Заявка %s. Ошибка. Выход', order.ref)
                 order.addinfo(op='error')
+                self._save_broker_state()
                 return  # то заявку не отменяем, выходим, дальше не продолжаем
             try:
                 self.logger.debug('on_trans_reply: Заявка %s переведена в статус отклонена (Order.Rejected)', order.ref)
@@ -392,6 +399,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 self.logger.error('on_trans_reply: Exception for change order.status: %s', e)
                 order.status = Order.Margin  # все равно ставим статус заявки Order.Margin
             order.addinfo(op='margin')
+        self._save_broker_state()
         with self._lock_notifs:
             self.notifs.append(order.clone())  # Уведомляем брокера о заявке
         if order.status != Order.Accepted:  # Если новая заявка не зарегистрирована
@@ -415,6 +423,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 return
             order: Order = self.orders[trans_id]
         order.addinfo(order_num=order_num)  # Сохраняем номер заявки на бирже (может быть переход от стоп заявки к лимитной с изменением номера на бирже)
+        self._save_broker_state()
         self.logger.debug('on_trade: Заявка %s с номером %s. Номер транзакции %s. Номер сделки %s order=%s', order.ref, order_num, trans_id, trade_num, order)
         class_code = qk_trade.class_code  # Код режима торгов
         sec_code = qk_trade.sec_code  # Код тикера
@@ -422,12 +431,11 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         # Защита от дублей сделок (критичная секция - check-then-act)
         # Используем asyncio.Lock для оптимальной работы в async контексте
         async with self._lock_trades:
-            if dataname not in self.trade_nums.keys():  # Если это первая сделка по тикеру
-                self.trade_nums[dataname] = []  # то ставим пустой список сделок
-            elif trade_num in self.trade_nums[dataname]:  # Если номер сделки есть в списке (фильтр для дублей)
+            if trade_num in self.trade_nums[dataname]:  # Если номер сделки есть в списке (фильтр для дублей)
                 self.logger.debug('on_trade: Заявка %s. Номер сделки %s есть в списке сделок (дубль). Выход', order.ref, trade_num)
                 return
-            self.trade_nums[dataname].append(trade_num)  # Запоминаем номер сделки по тикеру, чтобы в будущем ее не обрабатывать (фильтр для дублей)
+            else:  # Если номер сделки новый
+                self.trade_nums[dataname].add(trade_num)  # Запоминаем номер сделки по тикеру, чтобы в будущем ее не обрабатывать (фильтр для дублей)
 
         size = qk_trade.qty  # Абсолютное кол-во
         if self.store.p.lots:  # Если входящий остаток в лотах
@@ -447,11 +455,13 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             if order.status != order.Partial:  # Если заявка переходит в статус частичного исполнения (может исполняться несколькими частями)
                 self.logger.debug('on_trade: Заявка %s переведена в статус частично исполнена (Order.Partial)', order.ref)
                 order.partial()  # Переводим заявку в статус Order.Partial
+                self._save_broker_state()
                 with self._lock_notifs:
                     self.notifs.append(order.clone())  # Уведомляем брокера о частичном исполнении заявки
         else:  # Если заявка исполнена полностью (ничего нет к исполнению)
             self.logger.debug('on_trade: Заявка %s переведена в статус полностью исполнена (Order.Completed)', order.ref)
             order.completed()  # Переводим заявку в статус Order.Completed
+            self._save_broker_state()
             with self._lock_notifs:
                 self.notifs.append(order.clone())  # Уведомляем брокера о полном исполнении заявки
             # Снимаем oco-заявку только после полного исполнения заявки
@@ -506,6 +516,109 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                     last_price = await self.store._quik_price_to_SUR(class_code, sec_code, last_price)
                     value += position.size * last_price
         return value
+
+    async def _load_all_orders(self):
+        """Получение всех активных заявок по счету"""
+        orders = self._load_broker_state()
+        if orders is None:
+            return
+        ord_list = await self.store._get_orders()
+        stop_ord_list = await self.store._get_stop_orders()
+        founded = set()
+        for o in ord_list:
+            self.logger.debug('Active Order: %s', str(o))
+            if o.trans_id in orders:
+                order: Order = orders[o.trans_id]
+                order.addinfo(order_num=o.order_num)
+                match o.state:
+                    case State.ACTIVE:
+                        if order.status==Order.Submitted or order.status==Order.Created:
+                            order.status = Order.Accepted
+                        if order.status==Order.Accepted and o.ext_order_status == 2:  # Если заявка принята и частично исполнена
+                            order.status = Order.Partial
+                    case State.CANCELED:
+                        order.status = Order.Canceled
+                    case State.COMPLETED:
+                        order.status = Order.Completed
+                    case _:
+                        pass
+                order.price = float(o.price)
+                founded.add(o.trans_id)
+
+        for o in stop_ord_list:
+            self.logger.debug('Active Stop Order: %s', str(o))
+            if o.trans_id in orders:
+                order: Order = orders[o.trans_id]
+                order.addinfo(order_num=o.order_num)
+                match o.state:
+                    case State.ACTIVE:
+                        if order.status==Order.Submitted or order.status==Order.Created:
+                            order.status = Order.Accepted
+                    case State.CANCELED:
+                        order.status = Order.Canceled
+                    case State.COMPLETED:
+                        order.status = Order.Completed
+                    case _:
+                        pass
+                order.price = float(o.price)
+                founded.add(o.trans_id)
+        orders_to_remove = set(orders.keys()) - founded
+        for trans_id in orders_to_remove:
+            del orders[trans_id]
+        with self._lock_orders:
+            self.orders = orders
+        self._save_broker_state()
+
+
+    def _save_broker_state(self):
+        """Сохранение состояния брокера"""
+        with self._lock_orders:
+            state = {}
+            state['version'] = 1
+            state['orders'] = {}
+            state['last_order_ref'] = Order.last_ref()
+            state['ocos'] = self.ocos
+            trade_nums_serializable = {}
+            for k, v in self.trade_nums.items():
+                trade_nums_serializable[k] = list(v)
+            state['trade_nums'] = trade_nums_serializable
+            ord = {}
+            for k, v in self.orders.items():
+                ord[k] = v.to_dict()
+            state['orders'] = ord
+            with open(self._state_file, 'w') as f:
+                json.dump(state, f)
+
+    def _load_broker_state(self) -> None|dict:
+        """Загрузка состояния брокера"""
+        if not os.path.exists(self._state_file):
+            return None
+        try:
+            with open(self._state_file, 'r') as f:
+                state = json.load(f)
+        except Exception as e:
+            self.logger.error('load_broker_state: Ошибка чтения состояния брокера из файла %s: %s', self._state_file, e)
+            return None
+        version = state.get('version', 1)
+        if version != 1:
+            self.logger.error('load_broker_state: Неподдерживаемая версия состояния брокера: %s', version)
+            return None
+        orders_dict = state.get('orders', {})
+        orders = {}
+        for k, v in orders_dict.items():
+            order = Order.from_dict(v)
+            order.broker = self
+            data_id = order.info["data_id"]
+            order.data = self.store._get_data_by_id(data_id)
+            orders[k] = order
+        last_order_ref = state.get('last_order_ref', 0)
+        Order.reset_ref(last_order_ref)
+        self.ocos = state.get('ocos', {})
+        trade_nums_serializable = state.get('trade_nums', defaultdict(set))
+        for k, v in trade_nums_serializable.items():
+            self.trade_nums[k] = set(v)
+        return orders
+
 
     async def _get_all_active_positions(self):  ##!! CHECK ME and UseME
         positions = defaultdict(Position)
