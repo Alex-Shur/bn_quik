@@ -1,5 +1,6 @@
 import logging
 import collections
+import os
 import threading
 import asyncio
 import atexit
@@ -114,6 +115,26 @@ class Account:
         self.firm_id = firm_id
         self.class_codes = class_codes
 
+    def to_dict(self):
+        return {
+            'trade_account_id': self.trade_account_id,
+            'client_code': self.client_code,
+            'firm_id': self.firm_id,
+            'class_codes': self.class_codes,
+            'futures': self.futures,
+            'is_ucp': self.is_ucp,
+        }
+
+    @classmethod
+    def from_dict(cls, odict):
+        return cls(
+            trade_account_id=odict.get('trade_account_id'),
+            client_code=odict.get('client_code'),
+            firm_id=odict.get('firm_id'),
+            class_codes=odict.get('class_codes', []),
+            futures=odict.get('futures', False),
+            is_ucp=odict.get('is_ucp', False),
+        )
 
 class QuikStore(with_metaclass(MetaSingleton, object)):
     '''
@@ -656,7 +677,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         """
         Получение уникального идентификатора данных по тикеру и временному интервалу
         """
-        return f'{class_code}.{sec_code}_{interval.name}'
+        return f'{class_code}.{sec_code}.{interval.name}'
 
     async def _send_transaction(self, transaction) -> int:
         """Отправка транзакции в QUIK"""

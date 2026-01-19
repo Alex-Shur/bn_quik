@@ -215,8 +215,8 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             order.size = math.copysign(await self.store._lots_to_size(class_code, sec_code, quantity), order.size)
 
         trans_id = int(time.time() * 1000) % 100000000  # time in milliseconds
-        order.info["trans_id"] = trans_id
-        order.info["data_id"] = order.data.data_id
+        order.addinfo(trans_id = trans_id)
+        order.addinfo(data_id = order.data.data_id)
 
         transaction = Transaction()
         transaction.TRANS_ID = trans_id
@@ -569,9 +569,17 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             self.orders = orders
         self._save_broker_state()
 
-
     def _save_broker_state(self):
         """Сохранение состояния брокера"""
+        def _info2dict(vals:dict):
+            info = {}
+            for k, v in vals.items():
+                if k == 'account':
+                    info['account'] = v.to_dict()
+                else:
+                    info[k] = v
+            return info
+
         with self._lock_orders:
             state = {}
             state['version'] = 1
@@ -585,9 +593,10 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             ord = {}
             for k, v in self.orders.items():
                 ord[k] = v.to_dict()
+                ord[k]['info'] = _info2dict(v.info)
             state['orders'] = ord
             with open(self._state_file, 'w') as f:
-                json.dump(state, f)
+                json.dump(state, f, indent=2)
 
     def _load_broker_state(self) -> None|dict:
         """Загрузка состояния брокера"""
@@ -606,12 +615,35 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         orders_dict = state.get('orders', {})
         orders = {}
         for k, v in orders_dict.items():
-            order = Order.from_dict(v)
+            params = v.get('params', {})
+            info = v.get('info', {})
+            data_id = info.get('data_id', None)
+            if data_id is None:
+                self.logger.error('load_broker_state: Ошибка загрузки заявки %s: нет data_id', k)
+                continue
+            data = None
+            for d in self.cerebro.datas:
+                if d.data_id == data_id:
+                    data = d
+                    break
+            if data is None:
+                self.logger.error('load_broker_state: Ошибка загрузки заявки %s: не найден тикер с data_id=%s', k, data_id)
+                continue
+            params['data'] = data
+            order = Order.from_dict(params, v)
             order.broker = self
-            data_id = order.info["data_id"]
-            order.data = self.store._get_data_by_id(data_id)
+            order.addinfo(account=self.account)
+            order.addcomminfo(self.getcommissioninfo(data))
             orders[k] = order
+
         last_order_ref = state.get('last_order_ref', 0)
+        for v in orders.values():
+            if v.parent_ref is not None:
+                for o in orders.values():
+                    if o.ref == v.parent_ref:
+                        v.parent = o
+                        break
+
         Order.reset_ref(last_order_ref)
         self.ocos = state.get('ocos', {})
         trade_nums_serializable = state.get('trade_nums', defaultdict(set))
