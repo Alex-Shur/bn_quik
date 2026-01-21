@@ -1,6 +1,6 @@
 [project]
 name = "bn_quik"
-version = "0.1.0"
+version = "0.1.1"
 description = "Backtrader-next connector for QUIK terminal"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
@@ -16,7 +16,7 @@ classifiers = [
 
 requires-python = ">=3.11"
 dependencies = [
-    "backtrader-next>=2.1.0",
+    "backtrader-next>=2.2.1",
     "quik-python>=1.2.0",
 ]
 [project.urls]
