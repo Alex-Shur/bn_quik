@@ -1,2 +1,2 @@
-backtrader-next>=2.1.0
+backtrader-next>=2.2.1
 quik-python>=1.2.0
