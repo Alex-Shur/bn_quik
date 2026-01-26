@@ -279,8 +279,8 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         self.quik_api.events.remove_on_disconnected(self._on_disconnected)
         self.quik_api.events.remove_on_trans_reply(self._on_transaction_reply)
         self.quik_api.events.remove_on_trans_reply(self._on_trade)
-        # self.quik_api.events.remove_on_order(self._on_order)
-        # self.quik_api.events.remove_on_stop_order(self._on_stop_order)
+        self.quik_api.events.remove_on_order(self._on_order)
+        self.quik_api.events.remove_on_stop_order(self._on_stop_order)
 
         self.logger.info("Stopping QUIK async loop...")
         self._stop_event.set()  # Устанавливаем флаг остановки
@@ -323,8 +323,8 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.quik_api.events.add_on_disconnected(self._on_disconnected)
             self.quik_api.events.add_on_trans_reply(self._on_transaction_reply)
             self.quik_api.events.add_on_trade(self._on_trade)
-            # self.quik_api.events.add_on_order(self._on_order)
-            # self.quik_api.events.add_on_stop_order(self._on_stop_order)
+            self.quik_api.events.add_on_order(self._on_order)
+            self.quik_api.events.add_on_stop_order(self._on_stop_order)
 
         except Exception as e:
             self.logger.error("Ошибка подключения: %s", e)
@@ -350,23 +350,23 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
     async def _on_transaction_reply(self, reply: TransactionReply):
         # self.logger.debug(reply)
         if self.broker:
-            await self.broker._on_trans_reply(reply)
+            await self.broker.on_trans_reply(reply)
 
     async def _on_order(self, order : Order):
         # self.logger.info(order)
         if self.broker:
-            await self.broker._on_order(order)
+            await self.broker.on_order(order)
 
     async def _on_stop_order(self, stop_order:StopOrder):
         # self.logger.info(stop_order)
         if self.broker:
-            await self.broker._on_stop_order(stop_order)
+            await self.broker.on_stop_order(stop_order)
             pass
 
     async def _on_trade(self, trade: Trade):
         # self.logger.debug(trade)
         if self.broker:
-            await self.broker._on_trade(trade)
+            await self.broker.on_trade(trade)
 
     def _get_data_by_id(self, data_id: str):
         """Получение данных по тикеру и временному интервалу"""

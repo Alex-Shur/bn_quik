@@ -16,7 +16,8 @@ from quik_python.data_structures import Transaction, Trade, TransactionReply
 from quik_python.data_structures.money_limit_ex import MoneyLimitEx
 from quik_python.data_structures.order import OrderTradeFlags, State
 from quik_python.data_structures.portfolio_info_ex import PortfolioInfoEx
-from quik_python.data_structures.stop_order import StopOrder
+from quik_python.data_structures.stop_order import StopOrder as QuikStopOrder
+from quik_python.data_structures.order import Order as QuikOrder
 from quik_python.data_structures.transaction_types import TransactionAction, TransactionOperation, TransactionType
 
 from .QuikStore import QuikStore, Account
@@ -298,6 +299,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 return None
 
         order_num = order.info['order_num']
+        linked_order = order.info.get('linked_order', 0)
         is_stop = order.exectype in [Order.Stop, Order.StopLimit]
         is_stop_order = is_stop and await self.store.get_order_by_number(order_num) is None
 
@@ -307,8 +309,12 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         transaction.SECCODE = order.data.sec_code
 
         if is_stop_order:  # Для стоп заявки
-            transaction.ACTION = TransactionAction.KILL_STOP_ORDER
-            transaction.STOP_ORDER_KEY = str(order_num)
+            if linked_order== 0: # Если нет связанной лимитной заявки, то отменяем стоп-заявку
+                transaction.ACTION = TransactionAction.KILL_STOP_ORDER
+                transaction.STOP_ORDER_KEY = str(order_num)
+            else:  # Если есть связанная лимитная заявка, то отменяем лимитную заявку
+                transaction.ACTION = TransactionAction.KILL_ORDER
+                transaction.ORDER_KEY = str(linked_order)
         else:  # Для лимитной заявки
             transaction.ACTION = TransactionAction.KILL_ORDER
             transaction.ORDER_KEY = str(order_num)
@@ -341,7 +347,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                     await self.cancel_order(child)  # Отменяем дочернюю заявку
 
 
-    async def _on_trans_reply(self, data: TransactionReply):
+    async def on_trans_reply(self, data: TransactionReply):
         """Обработчик события ответа на транзакцию пользователя"""
         self.logger.debug('on_trans_reply: data=%s', str(data))
         qk_trans_reply = data
@@ -361,7 +367,8 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             order_op = order.info["op"]
             if order_op == 'new':
                 self.logger.debug('on_trans_reply: Заявка %s переведена в статус принята на бирже (Order.Accepted)', order.ref)
-                order.accept(self)  # Заявка принята на бирже (Order.Accepted)
+                with self.store.lock_store_data:
+                    order.accept(self)  # Заявка принята на бирже (Order.Accepted)
                 order.addinfo(op='done')
             elif order_op == 'cancel':
                 self.logger.debug('on_trans_reply: Заявка %s переведена в статус отменена (Order.Canceled)', order.ref)
@@ -403,7 +410,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         self.logger.debug('on_trans_reply: Заявка %s. Выход', order.ref)
 
 
-    async def _on_trade(self, data: Trade):
+    async def on_trade(self, data: Trade):
         """Обработчик события получения новой / изменения существующей сделки.
         Выполняется до события изменения существующей заявки. Нужен для определения цены исполнения заявок.
         """
@@ -469,12 +476,48 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             self.value = await self._getvalue(None)
 
 
-    async def _on_order(self, order : Order):
+    async def on_order(self, order : QuikOrder):
         self.logger.debug('on_order trans_id=%s order_num=%s  ext_status=%s  flags=%s  state=%s', order.trans_id, order.order_num, order.ext_order_status, order.flags, order.state)
+        trans_id = order.trans_id
+        with self._lock_orders:
+            if trans_id not in self.orders:
+                self.logger.debug('on_order: Заявка с номером %s. Номер транзакции %s. Заявка была выставлена не из торговой системы. Выход', order.order_num, trans_id)
+                return
+            order: Order = self.orders[trans_id]
+        if order.exectype in (Order.Stop, Order.StopLimit):
+            linked_order = order.info.get('linked_order', 0)
+            if linked_order != 0 and order.order_num == linked_order:
+                self.logger.debug('on_order: Заявка %s является стоп-заявкой', order.ref)
+                notifs = False
+                if order.state == State.CANCELED:
+                    self.logger.debug('on_order: Linked Заявка %s переведена в статус отклонена (Order.Rejected)', order.ref)
+                    with self.store.lock_store_data:
+                        order.reject(self)  # Отклоняем заявку (Order.Rejected)
+                    notifs = True
+                elif order.state == State.COMPLETED:
+                    self.logger.debug('on_order: Linked Заявка %s исполнена (Order.Сompleted)', order.ref)
+                    with self.store.lock_store_data:
+                        order.completed(self)  # Переводим заявку в статус Order.Completed
+                    notifs = True
+                self._save_broker_state()
+                if notifs:
+                    with self._lock_notifs:
+                        self.notifs.append(order.clone())  # Уведомляем брокера о заявке
 
-    async def _on_stop_order(self, stop_order:StopOrder):
+    async def on_stop_order(self, stop_order:QuikStopOrder):
         self.logger.debug('on_stop_order trans_id=%s order_num=%s  linked_order=%s  flags=%s  state=%s', stop_order.trans_id, stop_order.order_num, stop_order.linked_order, stop_order.flags, stop_order.state)
-
+        trans_id = stop_order.trans_id
+        with self._lock_orders:
+            if trans_id not in self.orders:
+                self.logger.debug('on_stop_order: Заявка с номером %s. Номер транзакции %s. Заявка была выставлена не из торговой системы. Выход', stop_order.order_num, trans_id)
+                return
+            order: Order = self.orders[trans_id]
+        state = stop_order.state
+        if state == State.COMPLETED:
+            order.addinfo(linked_order=stop_order.linked_order)
+            self._save_broker_state()
+        with self._lock_notifs:
+            self.notifs.append(order.clone())  # Уведомляем брокера о заявке
 
     def submit(self, order):
         """Отправка заявки на биржу (требуется BrokerBase)"""
