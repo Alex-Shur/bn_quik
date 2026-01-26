@@ -42,7 +42,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
 
     def __init__(self, **kwargs):
         self.store = QuikStore(**kwargs)  # Хранилище QUIK
-        self.class_code, self.sec_code = self.store.__class__.run_sync(self.store._parse_ticker_name(self.p.dataname))
+        self.class_code, self.sec_code = QuikStore.run_sync(self.store.parse_ticker_name(self.p.dataname))
         # tf = self.store._bt_timeframe_to_str(self.p.timeframe, self.p.compression)
         self.candle_interval = self.store._bt_timeframe_2_quik(self.p.timeframe, self.p.compression)
         self._data_id = self.store._get_data_id(self.class_code, self.sec_code, self.candle_interval)
@@ -73,7 +73,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         if self.p.live_bars:  # Если получаем историю и новые бары
             if not self.store._is_subscribed_to_candles(self.class_code, self.sec_code, self.candle_interval):
                 self.store._subscribe_to_candles(self.class_code, self.sec_code, self.candle_interval)  # Подписываемся на новые бары
-        self.info = self.store._get_ticker_info_sync(self.class_code, self.sec_code)
+        self.info = self.store.get_ticker_info_sync(self.class_code, self.sec_code)
 
         cur_datetime = self.store._get_quik_datetime_now()
         self.put_notification(self.DELAYED)  # Отправляем уведомление об отправке исторических (не новых) баров

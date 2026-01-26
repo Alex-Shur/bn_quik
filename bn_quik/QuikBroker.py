@@ -32,11 +32,6 @@ class MetaQuikBroker(BrokerBase.__class__):
 # noinspection PyProtectedMember,PyArgumentList
 class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
-    params = (
-        ('client_code_for_orders', None),  # Номер торгового терминала. У брокера Финам требуется для совершения торговых операций
-        ('trade_account_id', None),
-    )
-
     account:Account = None
 
     def __init__(self, **kwargs):
@@ -68,12 +63,12 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
     async def __get_account(self):
         if not self.account:
             acc_list = await self.store.get_accounts()
-            self.account = next((a for a in acc_list if a.trade_account_id == self.p.trade_account_id), None)
+            self.account = next((a for a in acc_list if a.trade_account_id == self.store.p.trade_account_id), None)
             # Если для заявок брокер устанавливает отдельный код клиента, то задаем его в параметре client_code_for_orders
             # В остальных случаях получаем код клиента из заявки (счета). Для фьючерсов кода клиента нет
             if self.account:
-                self.account.order_client_code = self.p.client_code_for_orders if self.p.client_code_for_orders else self.account.client_code
-                self.account.is_ucp = await self.store._is_ucp_client(self.account.firm_id, self.account.client_code)
+                self.account.order_client_code = self.store.p.client_code_for_orders if self.store.p.client_code_for_orders else self.account.client_code
+                self.account.is_ucp = await self._is_ucp_client(self.account.firm_id, self.account.client_code)
                 self.logger.info(f"Account {self.account.trade_account_id} is UCP: {self.account.is_ucp}")
         return self.account
 
@@ -85,7 +80,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         self.store.broker = self
         self.account = await self.__get_account()
         if not self.account:
-            raise ValueError(f'QuikBroker: Не найден счет с trade_account_id={self.p.trade_account_id}')
+            raise ValueError(f'QuikBroker: Не найден счет с trade_account_id={self.store.p.trade_account_id}')
         await self._get_all_active_positions()
         self.cash = await self._getcash()
         self.value = await self._getvalue(None)
@@ -93,7 +88,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
     def start(self):
         super(QuikBroker, self).start()
-        self.store.__class__.run_sync(self.__start_async())
+        QuikStore.run_sync(self.__start_async())
 
     def stop(self):
         super(QuikBroker, self).stop()
@@ -118,7 +113,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             with self._lock_cash:
                 return self.value + self.cash
         else:
-            return self.store.__class__.run_sync(self._getvalue(datas))
+            return QuikStore.run_sync(self._getvalue(datas))
 
     def getposition(self, data):
         """Позиция по тикеру
@@ -129,19 +124,19 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
     def buy(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None, tradeid=0, oco=None, trailamount=None, trailpercent=None, parent=None, transmit=True, **kwargs):
         """Заявка на покупку"""
-        order = self.store.__class__.run_sync(self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, True, **kwargs))
+        order = QuikStore.run_sync(self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, True, **kwargs))
         self.notifs.append(order.clone())  # Уведомляем брокера об отправке новой заявки на покупку на биржу
         return order
 
     def sell(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None, tradeid=0, oco=None, trailamount=None, trailpercent=None, parent=None, transmit=True, **kwargs):
         """Заявка на продажу"""
-        order = self.store.__class__.run_sync(self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, False, **kwargs))
+        order = QuikStore.run_sync(self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, False, **kwargs))
         self.notifs.append(order.clone())  # Уведомляем брокера об отправке новой заявки на продажу на биржу
         return order
 
     def cancel(self, order):
         """Отмена заявки"""
-        return self.store.__class__.run_sync(self.cancel_order(order))
+        return QuikStore.run_sync(self.cancel_order(order))
 
     def get_notification(self):
         with self._lock_notifs:
@@ -174,7 +169,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             return order
 
         order.addinfo(account=self.account)  # Передаем в заявку счет
-        si = await self.store._get_ticker_info(class_code, sec_code)
+        si = await self.store.get_ticker_info(class_code, sec_code)
         if not si:
             self.logger.error('create_order: Постановка заявки %s по тикеру %s.%s отменена. Тикер не найден', order.ref, class_code, sec_code)
             order.reject(self)
@@ -211,8 +206,8 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         sec_code = order.data.sec_code
         quantity = abs(order.size)
         if self.store.p.lots:
-            quantity = await self.store._size_to_lots(class_code, sec_code, quantity)
-            order.size = math.copysign(await self.store._lots_to_size(class_code, sec_code, quantity), order.size)
+            quantity = await self._size_to_lots(class_code, sec_code, quantity)
+            order.size = math.copysign(await self._lots_to_size(class_code, sec_code, quantity), order.size)
 
         trans_id = int(time.time() * 1000) % 100000000  # time in milliseconds
         order.addinfo(trans_id = trans_id)
@@ -236,10 +231,10 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         if order.exectype == Order.Market:
             transaction.TYPE = TransactionType.M
             if order.data.derivative:  # Для деривативов
-                last_price = float(await self.store._get_last_price(class_code, sec_code))
+                last_price = float(await self.store.get_last_price(class_code, sec_code))
                 # Из документации QUIK: При покупке/продаже фьючерсов по рынку нужно ставить цену хуже последней сделки
                 last_price = last_price + slippage if order.isbuy() else last_price - slippage
-                market_price = await self.store._price_to_valid_price(class_code, sec_code, last_price)
+                market_price = await self.store.price_to_valid_price(class_code, sec_code, last_price)
             else:
                 market_price = Decimal(0)  # Цена рыночной заявки должна быть нулевой
             transaction.PRICE = market_price  # Рыночную цену QUIK ставим в заявку
@@ -247,25 +242,25 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         # Лимитная заявка
         elif order.exectype == Order.Limit:
             transaction.TYPE = TransactionType.L  # Лимитная заявка
-            limit_price = await self.store._price_to_valid_price(class_code, sec_code, order.price)
+            limit_price = await self.store.price_to_valid_price(class_code, sec_code, order.price)
             transaction.PRICE = limit_price  # Лимитную цену QUIK Ставим в заявку
 
         # Стоп заявка
         elif order.exectype == Order.Stop:
-            stop_price = await self.store._price_to_valid_price(class_code, sec_code, order.price)
+            stop_price = await self.store.price_to_valid_price(class_code, sec_code, order.price)
             transaction.STOPPRICE = stop_price  # Стоп цену QUIK ставим в заявкуСтавим в заявку
             if order.data.derivative:  # Для деривативов
                 market_price = stop_price + slippage if order.isbuy() else stop_price - slippage
-                market_price = await self.store._price_to_valid_price(class_code, sec_code, market_price)  # Из документации QUIK: При покупке/продаже фьючерсов по рынку нужно ставить цену хуже последней сделки
+                market_price = await self.store.price_to_valid_price(class_code, sec_code, market_price)  # Из документации QUIK: При покупке/продаже фьючерсов по рынку нужно ставить цену хуже последней сделки
             else:  # Для остальных рынков
                 market_price = Decimal(0)  # Цена рыночной заявки должна быть нулевой
             transaction.PRICE = market_price  # Рыночную цену QUIK ставим в заявку
 
         # Стоп-лимитная заявка
         elif order.exectype == Order.StopLimit:
-            stop_price = await self.store._price_to_valid_price(class_code, sec_code, order.price)
+            stop_price = await self.store.price_to_valid_price(class_code, sec_code, order.price)
             transaction.STOPPRICE = stop_price  # Стоп цену QUIK ставим в заявку
-            limit_price = await self.store._price_to_valid_price(class_code, sec_code, order.pricelimit)
+            limit_price = await self.store.price_to_valid_price(class_code, sec_code, order.pricelimit)
             transaction.PRICE = limit_price  # Лимитную цену QUIK Ставим в заявку
 
         # Для стоп заявок
@@ -281,7 +276,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         with self._lock_orders:
             self.orders[trans_id] = order  # Сохраняем заявку в списке заявок, отправленных на биржу
         self._save_broker_state()
-        trans_id = await self.store._send_transaction(transaction)
+        trans_id = await self.store.send_transaction(transaction)
         order.submit(self)  # Отправляем заявку на биржу (Order.Submitted)
         self._save_broker_state()
         if trans_id < 0:  # Если возникла ошибка при постановке заявки на уровне QUIK
@@ -304,7 +299,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
         order_num = order.info['order_num']
         is_stop = order.exectype in [Order.Stop, Order.StopLimit]
-        is_stop_order = is_stop and await self.store._get_order_by_number(order_num) is None
+        is_stop_order = is_stop and await self.store.get_order_by_number(order_num) is None
 
         transaction = Transaction()
         transaction.TRANS_ID = trans_id
@@ -319,7 +314,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             transaction.ORDER_KEY = str(order_num)
         order.addinfo(op='cancel')
         self._save_broker_state()
-        await self.store._send_transaction(transaction)
+        await self.store.send_transaction(transaction)
         return order
 
     async def oco_pc_check(self, order):
@@ -370,7 +365,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 order.addinfo(op='done')
             elif order_op == 'cancel':
                 self.logger.debug('on_trans_reply: Заявка %s переведена в статус отменена (Order.Canceled)', order.ref)
-                with self.store._lock_store_data:
+                with self.store.lock_store_data:
                     order.cancel()  # Отменяем существующую заявку (Order.Canceled)
                 order.addinfo(op='done')
         elif status in (2, 4, 5, 10, 11, 12, 13, 14, 16):  # Транзакция не выполнена (ошибка заявки):
@@ -384,7 +379,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 return  # то заявку не отменяем, выходим, дальше не продолжаем
             try:
                 self.logger.debug('on_trans_reply: Заявка %s переведена в статус отклонена (Order.Rejected)', order.ref)
-                with self.store._lock_store_data:
+                with self.store.lock_store_data:
                     order.reject(self)  # Отклоняем заявку (Order.Rejected)
             except (KeyError, IndexError) as e:
                 self.logger.error('on_trans_reply: Exception for change order.status: %s', e)
@@ -393,7 +388,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         elif status == 6:  # Транзакция не прошла проверку лимитов сервера QUIK
             try:
                 self.logger.debug('on_trans_reply: Заявка %s переведена в статус не прошла проверку лимитов (Order.Margin)', order.ref)
-                with self.store._lock_store_data:
+                with self.store.lock_store_data:
                     order.margin()  # Для заявки не хватает средств (Order.Margin)
             except (KeyError, IndexError) as e:
                 self.logger.error('on_trans_reply: Exception for change order.status: %s', e)
@@ -427,7 +422,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         self.logger.debug('on_trade: Заявка %s с номером %s. Номер транзакции %s. Номер сделки %s order=%s', order.ref, order_num, trans_id, trade_num, order)
         class_code = qk_trade.class_code  # Код режима торгов
         sec_code = qk_trade.sec_code  # Код тикера
-        dataname = self.store._get_ticker_name(class_code, sec_code)
+        dataname = self.store.get_ticker_name(class_code, sec_code)
         # Защита от дублей сделок (критичная секция - check-then-act)
         # Используем asyncio.Lock для оптимальной работы в async контексте
         async with self._lock_trades:
@@ -439,7 +434,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
         size = qk_trade.qty  # Абсолютное кол-во
         if self.store.p.lots:  # Если входящий остаток в лотах
-            size = await self.store._lots_to_size(class_code, sec_code, size)  # то переводим кол-во из лотов в штуки
+            size = await self._lots_to_size(class_code, sec_code, size)  # то переводим кол-во из лотов в штуки
         if qk_trade.flags & OrderTradeFlags.IS_SELL.value:
             size *= -1  # Продажа - кол-во ставим отрицательным
         price = float(qk_trade.price) # Цена сделки
@@ -483,7 +478,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
 
     def submit(self, order):
         """Отправка заявки на биржу (требуется BrokerBase)"""
-        return self.store.__class__.run_sync(self.place_order(order))
+        return QuikStore.run_sync(self.place_order(order))
 
 
     def add_order_history(self, orders, notify=True):
@@ -510,10 +505,10 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             for ticker_name, position in self._positions.items():
                 if datas and not any(data.p.dataname == ticker_name for data in datas):
                     continue
-                class_code, sec_code = await self.store._parse_ticker_name(ticker_name)
-                last_price =  await self.store._get_last_price(class_code, sec_code)
+                class_code, sec_code = await self.store.parse_ticker_name(ticker_name)
+                last_price =  await self.store.get_last_price(class_code, sec_code)
                 if last_price:
-                    last_price = await self.store._quik_price_to_SUR(class_code, sec_code, last_price)
+                    last_price = await self.store.quik_price_to_SUR(class_code, sec_code, last_price)
                     value += position.size * last_price
         return value
 
@@ -522,13 +517,14 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         orders = self._load_broker_state()
         if orders is None:
             return
-        ord_list = await self.store._get_orders()
-        stop_ord_list = await self.store._get_stop_orders()
+        ord_list = await self.store.get_orders()
+        stop_ord_list = await self.store.get_stop_orders()
         founded = set()
         for o in ord_list:
             self.logger.debug('Active Order: %s', str(o))
-            if o.trans_id in orders:
-                order: Order = orders[o.trans_id]
+            str_trans_id = str(o.trans_id)
+            if str_trans_id in orders:
+                order: Order = orders[str_trans_id]
                 order.addinfo(order_num=o.order_num)
                 match o.state:
                     case State.ACTIVE:
@@ -543,12 +539,13 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                     case _:
                         pass
                 order.price = float(o.price)
-                founded.add(o.trans_id)
+                founded.add(str_trans_id)
 
         for o in stop_ord_list:
             self.logger.debug('Active Stop Order: %s', str(o))
-            if o.trans_id in orders:
-                order: Order = orders[o.trans_id]
+            str_trans_id = str(o.trans_id)
+            if str_trans_id in orders:
+                order: Order = orders[str_trans_id]
                 order.addinfo(order_num=o.order_num)
                 match o.state:
                     case State.ACTIVE:
@@ -561,13 +558,12 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                     case _:
                         pass
                 order.price = float(o.price)
-                founded.add(o.trans_id)
+                founded.add(str_trans_id)
         orders_to_remove = set(orders.keys()) - founded
         for trans_id in orders_to_remove:
             del orders[trans_id]
         with self._lock_orders:
             self.orders = orders
-        self._save_broker_state()
 
     def _save_broker_state(self):
         """Сохранение состояния брокера"""
@@ -583,6 +579,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         with self._lock_orders:
             state = {}
             state['version'] = 1
+            state['broker_info'] = self.info
             state['orders'] = {}
             state['last_order_ref'] = Order.last_ref()
             state['ocos'] = self.ocos
@@ -612,9 +609,9 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         if version != 1:
             self.logger.error('load_broker_state: Неподдерживаемая версия состояния брокера: %s', version)
             return None
-        orders_dict = state.get('orders', {})
+        orders_state = state.get('orders', {})
         orders = {}
-        for k, v in orders_dict.items():
+        for k, v in orders_state.items():
             params = v.get('params', {})
             info = v.get('info', {})
             data_id = info.get('data_id', None)
@@ -635,7 +632,6 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             order.addinfo(account=self.account)
             order.addcomminfo(self.getcommissioninfo(data))
             orders[k] = order
-
         last_order_ref = state.get('last_order_ref', 0)
         for v in orders.values():
             if v.parent_ref is not None:
@@ -643,9 +639,9 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                     if o.ref == v.parent_ref:
                         v.parent = o
                         break
-
         Order.reset_ref(last_order_ref)
         self.ocos = state.get('ocos', {})
+        self.info = state.get('broker_info', {})
         trade_nums_serializable = state.get('trade_nums', defaultdict(set))
         for k, v in trade_nums_serializable.items():
             self.trade_nums[k] = set(v)
@@ -658,7 +654,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         if not acc:
             raise ValueError('QuikBroker: Не задан account для получения позиций')
         if acc.futures:
-            futures_holdings = await self.store._get_futures_client_holdings()
+            futures_holdings = await self.store.get_futures_client_holdings()
             for fut in futures_holdings:
                 if fut.total_net != 0:
                     self.logger.debug("Futures Position: %s TotalNet: %s AvrPosnPrice: %s", fut.sec_code, fut.total_net, fut.avr_pos_nprice)
@@ -666,25 +662,25 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                     sec_code = fut.sec_code
                     size = int(fut.total_net)
                     if self.store.p.lots:
-                        size = await self.store._lots_to_size(class_code, sec_code, size)
-                    dataname = self.store._get_ticker_name(class_code, sec_code)
-                    price = await self.store._quik_price_to_SUR(class_code, sec_code, fut.avr_pos_nprice)
+                        size = await self._lots_to_size(class_code, sec_code, size)
+                    dataname = self.store.get_ticker_name(class_code, sec_code)
+                    price = await self.store.quik_price_to_SUR(class_code, sec_code, fut.avr_pos_nprice)
                     positions[dataname] = Position(size, price)
         else:
-            depo_limits = await self.store._get_all_depo_limits()
+            depo_limits = await self.store.get_all_depo_limits()
             account_depo_limits = [limit for limit in depo_limits
                                     if limit.client_code == acc.client_code and
                                     limit.firm_id == acc.firm_id and
                                     limit.limit_kind.value == self.store.p.limit_kind and
                                     limit.current_bal != 0]
             for limit in account_depo_limits:
-                class_code, sec_code = await self.store._parse_ticker_name(limit.sec_code)
+                class_code, sec_code = await self.store.parse_ticker_name(limit.sec_code)
                 size = int(limit.current_bal)
                 if self.store.p.lots:  # Если входящий остаток в лотах
-                    size = await self.store._lots_to_size(class_code, sec_code, size)
+                    size = await self._lots_to_size(class_code, sec_code, size)
                 # Переводим средневзвешенную цену приобретения позиции (входа) в цену в рублях за штуку
-                price = await self.store._quik_price_to_SUR(class_code, sec_code, float(limit.wa_position_price))
-                dataname = self.store._get_ticker_name(class_code, sec_code)
+                price = await self.store.quik_price_to_SUR(class_code, sec_code, float(limit.wa_position_price))
+                dataname = self.store.get_ticker_name(class_code, sec_code)
                 positions[dataname] = Position(size, price)
         with self._lock_positions:
             self._positions = positions
@@ -692,7 +688,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
     async def _getcash(self):
         """Получение текущего баланса по всем счетам"""
         self.logger.debug('call _getcash()')
-        money_limits:MoneyLimitEx = await self.store._get_money_limits()
+        money_limits:MoneyLimitEx = await self.store.get_money_limits()
         if len(money_limits) == 0:
             self.logger.error("_getcash: Ошибка получения баланса - нет лимитов по деньгам")
             return 0.0
@@ -702,14 +698,14 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             raise ValueError('QuikBroker: Не задан account для получения позиций')
         if acc.futures:
             if self.store.p.edp:
-                portf:PortfolioInfoEx = await self.store._get_portfolio_info_ex(acc.firm_id, acc.client_code)
+                portf:PortfolioInfoEx = await self.store.get_portfolio_info_ex(acc.firm_id, acc.client_code)
                 if portf:
                     cash += portf.all_assets
                 else:
                     self.logger.error('_getcash: QUIK не вернул информацию по счету с firm_id=%s, client_code=%s. Проверьте правильность значений', acc.firm_id, acc.client_code)
             else:
                 # Баланс = Лимит откр.поз. + Вариац.маржа + Накоплен.доход
-                fut_limits = await self.store._get_futures_limit(acc.firm_id, acc.trade_account_id, self.store.p.currency)
+                fut_limits = await self.store.get_futures_limit(acc.firm_id, acc.trade_account_id, self.store.p.currency)
                 if fut_limits:
                     cash += fut_limits.cbp_limit + fut_limits.var_margin + fut_limits.accruedint
                 else:
@@ -729,4 +725,25 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             else:
                 cash += balance
         return cash
+
+    async def _is_ucp_client(self, firm_id: str, client_code: str) -> bool:
+        """Проверка, является ли клиент участником единой денежной позиции (УДП)"""
+        self.logger.debug("Checking if client %s.%s is UCP", firm_id, client_code)
+        try:
+            return await self.store.quik_api.trading.is_ucp_client(firm_id, client_code)
+        except Exception as e:
+            self.logger.error("Error checking UCP client: %s", e)
+            return False
+
+    async def _size_to_lots(self, class_code:str, sec_code:str, size) -> int:
+        info = await self.store.get_ticker_info(class_code, sec_code)
+        if info and info.lot_size and info.lot_size > 0:
+            return int(size // info.lot_size)
+        return size
+
+    async def _lots_to_size(self, class_code: str, sec_code: str, lots) -> int:
+        info = await self.store.get_ticker_info(class_code, sec_code)
+        if info and info.lot_size and info.lot_size > 0:
+            return int(lots * info.lot_size)
+        return lots
 

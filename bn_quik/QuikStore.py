@@ -101,19 +101,15 @@ class MetaSingleton(MetaParams):
 
 
 class Account:
-    client_code: str = None
-    order_client_code: str = None
-    firm_id: str = None
-    class_codes: List[str]
-    trade_account_id: str
-    futures: bool = False
-    is_ucp: bool = False
-
+    '''Account class to hold trade account information'''
     def __init__(self, trade_account_id: str, client_code: str, firm_id: str, class_codes: List[str]):
-        self.trade_account_id = trade_account_id
-        self.client_code = client_code
-        self.firm_id = firm_id
-        self.class_codes = class_codes
+        self.client_code: str = client_code
+        self.order_client_code: str = client_code
+        self.firm_id: str = firm_id
+        self.class_codes: List[str] = class_codes
+        self.trade_account_id: str = trade_account_id
+        self.futures: bool = False
+        self.is_ucp: bool = False
 
     def to_dict(self):
         return {
@@ -127,14 +123,16 @@ class Account:
 
     @classmethod
     def from_dict(cls, odict):
-        return cls(
+        acc = cls(
             trade_account_id=odict.get('trade_account_id'),
             client_code=odict.get('client_code'),
             firm_id=odict.get('firm_id'),
             class_codes=odict.get('class_codes', []),
-            futures=odict.get('futures', False),
-            is_ucp=odict.get('is_ucp', False),
         )
+        acc.futures = odict.get('futures', False)
+        acc.is_ucp = odict.get('is_ucp', False)
+        return acc
+        
 
 class QuikStore(with_metaclass(MetaSingleton, object)):
     '''
@@ -159,10 +157,9 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         ('edp', False),  # Единая денежная позиция
         ('slippage_steps', 10),  # Кол-во шагов цены для проскальзывания
         ('data_dir', 'DataQuik'),  # Каталог для хранения данных
-        #('notifyall', False),
-        #('_debug', False),
-        # ('reconnect', 3),  # -1 forever, 0 No, > 0 number of retries
-        # ('timeout', 3.0),  # timeout between reconnections
+
+        ('client_code_for_orders', None),  # Номер торгового терминала. У брокера Финам требуется для совершения торговых операций
+        ('trade_account_id', None),
     )
 
     @classmethod
@@ -211,7 +208,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         self._lock_qdata = threading.RLock()        # Гибридный: Async(_on_new_candle/_register_data/_unregister_data) + может быть sync доступ
         self._lock_notifs = threading.Lock()        # Гибридный: Sync(get_notifications/put_notification) + может быть async
         self._lock_accounts = threading.Lock()      # Только Async: get_accounts (но может расшириться)
-        self._lock_store_data = threading.RLock()   # Гибридный: Используется в QuikBroker для критических операций с данными
+        self.lock_store_data = threading.RLock()   # Гибридный: Используется в QuikBroker для критических операций с данными
         
         # Примечание: threading.Lock безопасен в данной архитектуре благодаря отдельному потоку для event loop.
 
@@ -454,7 +451,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting trade accounts: %s", e)
             return []
 
-    async def _get_ticker_info(self, class_code: str, sec_code: str) -> SecurityInfo | None:
+    async def get_ticker_info(self, class_code: str, sec_code: str) -> SecurityInfo | None:
         """Получение информации о тикере из QUIK"""
         key = (class_code, sec_code)
         self.logger.debug("Getting ticker info for %s.%s", class_code, sec_code)
@@ -474,19 +471,10 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
 
     def _get_ticker_info_sync(self, class_code: str, sec_code: str) -> dict:
         """Синхронное получение информации о тикере из QUIK"""
-        info = self.__class__.run_sync(self._get_ticker_info(class_code, sec_code))
+        info = QuikStore.run_sync(self.get_ticker_info(class_code, sec_code))
         return info.to_dict() if info else {}
     
-    async def _is_ucp_client(self, firm_id: str, client_code: str) -> bool:
-        """Проверка, является ли клиент участником единой денежной позиции (УДП)"""
-        self.logger.debug("Checking if client %s.%s is UCP", firm_id, client_code)
-        try:
-            return await self.quik_api.trading.is_ucp_client(firm_id, client_code)
-        except Exception as e:
-            self.logger.error("Error checking UCP client: %s", e)
-            return False
-
-    async def _get_portfolio_info_ex(self, firm_id: str, client_code: str) -> PortfolioInfoEx | None:
+    async def get_portfolio_info_ex(self, firm_id: str, client_code: str) -> PortfolioInfoEx | None:
         self.logger.debug("Getting extended portfolio info for %s.%s", firm_id, client_code)
         try:
             return await self.quik_api.trading.get_portfolio_info_ex(firm_id, client_code)
@@ -503,7 +491,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting extended ticker info: %s", e)
             return None
 
-    async def _get_all_depo_limits(self) -> List[DepoLimitEx]:
+    async def get_all_depo_limits(self) -> List[DepoLimitEx]:
         """Получение всех лимитов по бумагам из QUIK"""
         try:
             return await self.quik_api.trading.get_depo_limits()
@@ -511,7 +499,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting all depo limits: %s", e)
             return []
 
-    async def _get_money_limits(self) -> List[MoneyLimitEx]:
+    async def get_money_limits(self) -> List[MoneyLimitEx]:
         """Получение всех лимитов по деньгам из QUIK"""
         try:
             return await self.quik_api.trading.get_money_limits()
@@ -519,7 +507,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting all money limits: %s", e)
             return []
 
-    async def _get_futures_limit(self, firm_id: str, acc_id: str, curr_code: str = "") -> FuturesLimits | None:
+    async def get_futures_limit(self, firm_id: str, acc_id: str, curr_code: str = "") -> FuturesLimits | None:
         """Получение всех лимитов по фьючерсам из QUIK"""
         try:
             return await self.quik_api.trading.get_futures_limit(firm_id, acc_id, FuturesLimitType.MONEY, curr_code)
@@ -527,7 +515,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting futures limits: %s", e)
             return None
 
-    async def _get_orders(self) -> list[Order]:
+    async def get_orders(self) -> list[Order]:
         """Получение всех заявок из QUIK"""
         try:
             return await self.quik_api.orders.get_orders()
@@ -535,7 +523,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting orders: %s", e)
             return []
 
-    async def _get_stop_orders(self) -> list[StopOrder]:
+    async def get_stop_orders(self) -> list[StopOrder]:
         """Получение всех стоп-заявок из QUIK"""
         try:
             return await self.quik_api.stop_orders.get_stop_orders()
@@ -543,7 +531,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting stop orders: %s", e)
             return []
 
-    async def _get_order_by_number(self, order_num:int) -> Order | None:
+    async def get_order_by_number(self, order_num:int) -> Order | None:
         """Получение информации о заявке по её номеру"""
         try:
             return await self.quik_api.orders.get_order_by_number(order_num)
@@ -551,7 +539,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.logger.error("Error getting order by number: %s", e)
             return None
 
-    async def _get_futures_client_holdings(self) -> list[FuturesClientHolding]:
+    async def get_futures_client_holdings(self) -> list[FuturesClientHolding]:
         """Получение всех позиций по фьючерсам из QUIK"""
         try:
             return await self.quik_api.trading.get_futures_client_holdings()
@@ -581,7 +569,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             return datetime.now(self.tz_msk).replace(tzinfo=None)  # То время МСК получаем из локального времени
 
 
-    async def _parse_ticker_name(self, name:str) -> tuple[str, str] | None:
+    async def parse_ticker_name(self, name:str) -> tuple[str, str] | None:
         parts = name.split('.')
         if len(parts) >= 2:
             return (parts[0], '.'.join(parts[1:]))
@@ -597,7 +585,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                     self._sec_code2name[sec_code] = (class_code, sec_code)
                 return class_code, sec_code
 
-    def _get_ticker_name(self, class_code: str, sec_code: str) -> str:
+    def get_ticker_name(self, class_code: str, sec_code: str) -> str:
         return f'{class_code}.{sec_code}'
 
 
@@ -679,7 +667,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         """
         return f'{class_code}.{sec_code}.{interval.name}'
 
-    async def _send_transaction(self, transaction) -> int:
+    async def send_transaction(self, transaction) -> int:
         """Отправка транзакции в QUIK"""
         try:
             trans_id = await self.quik_api.trading.send_transaction(transaction)
@@ -711,19 +699,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                     self.logger.error('get_accounts: Ошибка получения списка счетов: %s', e)
             return self._accounts
 
-    async def _lots_to_size(self, class_code: str, sec_code: str, lots) -> int:
-        info = await self._get_ticker_info(class_code, sec_code)
-        if info and info.lot_size and info.lot_size > 0:
-            return int(lots * info.lot_size)
-        return lots
-
-    async def _size_to_lots(self, class_code:str, sec_code:str, size) -> int:
-        info = await self._get_ticker_info(class_code, sec_code)
-        if info and info.lot_size and info.lot_size > 0:
-            return int(size // info.lot_size)
-        return size
-
-    async def _get_last_price(self, class_code: str, sec_code: str) -> float | None:
+    async def get_last_price(self, class_code: str, sec_code: str) -> float | None:
         with self._lock_qdata:
             data = self.qdata_last.get((class_code, sec_code), None)
         if data and len(data):
@@ -747,11 +723,11 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                 self._ticker_stepprice[key] = (step_price, datetime.now(self.tz_msk))
         return step_price
 
-    async def _quik_price_to_SUR(self, class_code: str, sec_code: str, quik_price: float) -> float:
+    async def quik_price_to_SUR(self, class_code: str, sec_code: str, quik_price: float) -> float:
         """
         Перевод цены QUIK в цену в рублях за штуку
         """
-        si = await self._get_ticker_info(class_code, sec_code)
+        si = await self.get_ticker_info(class_code, sec_code)
         if not si:
             return quik_price  # то цена не изменяется
         if class_code in ('TQOB', 'TQCB', 'TQRD', 'TQIR'):  # Для облигаций (Т+ Гособлигации, Т+ Облигации, Т+ Облигации Д, Т+ Облигации ПИР)
@@ -766,9 +742,9 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                     return lot_price / lot_size  # Цена за штуку
         return quik_price
 
-    async def _price_to_valid_price(self, class_code: str, sec_code: str, price: float) -> Decimal:
+    async def price_to_valid_price(self, class_code: str, sec_code: str, price: float) -> Decimal:
         """Перевод цены в рублях за штуку в корректную цену QUIK"""
-        si = await self._get_ticker_info(class_code, sec_code)
+        si = await self.get_ticker_info(class_code, sec_code)
         if not si:
             return Decimal(str(price))
         # Возращаем цену, которую примет QUIK в заявке
@@ -779,7 +755,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
 
     async def _price_to_quik_price(self, class_code: str, sec_code: str, price: float) -> Decimal:
         """Перевод цены в рублях за штуку в цену QUIK"""
-        si = await self._get_ticker_info(class_code, sec_code)
+        si = await self.get_ticker_info(class_code, sec_code)
         if not si:
             return Decimal(str(price))
         min_price_step = si.min_price_step
