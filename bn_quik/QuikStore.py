@@ -150,8 +150,8 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         ('host', '127.0.0.1'),
         ('port', 34130),
         ('lots', True),  # Входящий остаток в лотах (задается брокером)
-        # ('limit_kind', 1),  # Основной режим торгов T1
-        ('limit_kind', -1),  # Quik Demo
+        ('limit_kind', 1),  # Основной режим торгов T1
+        #('limit_kind', -1),  # Quik Demo
         ('currency', 'SUR'),  # Валюта
         ('futures_firm_id', "SPBFUT"),  # Идентификатор фирмы для фьючерсов
         ('edp', False),  # Единая денежная позиция
@@ -469,7 +469,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                 self._ticker_info[key] = None
                 return None
 
-    def _get_ticker_info_sync(self, class_code: str, sec_code: str) -> dict:
+    def get_ticker_info_sync(self, class_code: str, sec_code: str) -> dict:
         """Синхронное получение информации о тикере из QUIK"""
         info = QuikStore.run_sync(self.get_ticker_info(class_code, sec_code))
         return info.to_dict() if info else {}
@@ -680,7 +680,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         """Получение списка счетов"""
         with self._lock_accounts:
             if not self._accounts:
-                money_limits:MoneyLimitEx = await self._get_money_limits()
+                money_limits:MoneyLimitEx = await self.get_money_limits()
                 if len(money_limits) == 0:
                     self.logger.error('get_money_limts: Ошибка нет лимитов по деньгам')
                     return self._accounts

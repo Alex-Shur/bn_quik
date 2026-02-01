@@ -26,7 +26,7 @@ class MetaQuikData(AbstractDataBase.__class__):
 class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
     """Данные QUIK"""
     params = (
-        ('drop_price_doji', False),  # False - не пропускать дожи 4-х цен, True - пропускать
+        ('drop_price_doji', False),  # True - удалять дожи 4-х цен, False - пропускать
         ('live_bars', False),  # False - только история, True - история и новые бары
         ('count', 2000),
     )
@@ -43,7 +43,6 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
     def __init__(self, **kwargs):
         self.store = QuikStore(**kwargs)  # Хранилище QUIK
         self.class_code, self.sec_code = QuikStore.run_sync(self.store.parse_ticker_name(self.p.dataname))
-        # tf = self.store._bt_timeframe_to_str(self.p.timeframe, self.p.compression)
         self.candle_interval = self.store._bt_timeframe_2_quik(self.p.timeframe, self.p.compression)
         self._data_id = self.store._get_data_id(self.class_code, self.sec_code, self.candle_interval)
         self.logger = logging.getLogger(f'QuikData.{self._data_id}')
@@ -56,6 +55,9 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         self.last_bar_received = False  # Получен последний бар
         self.live_mode = False  # Режим получения баров. False = История, True = Новые бары
         self.info = {}
+        # check if dir exists
+        if not os.path.exists(self.store.data_path):
+            os.makedirs(self.store.data_path)
 
     @property
     def data_id(self):
@@ -147,7 +149,7 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
             self.store.stop()
 
     def load(self):
-        with self.store._lock_store_data:
+        with self.store.lock_store_data:
             return super().load()
 
     def _load(self):

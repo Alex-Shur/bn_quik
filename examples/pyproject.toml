@@ -1,0 +1,9 @@
+[project]
+name = "examples"
+version = "0.1.0"
+description = "Examples of using bn_quik"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "bn-quik>=1.0.0"
+]

@@ -1,6 +1,6 @@
 [project]
 name = "bn_quik"
-version = "0.2.1"
+version = "1.0.0"
 description = "Backtrader-next connector for QUIK terminal"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
@@ -8,7 +8,7 @@ authors = [
     { name = "LEX"}
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: OS Independent",
@@ -18,6 +18,7 @@ requires-python = ">=3.11"
 dependencies = [
     "backtrader-next>=2.3.2",
     "quik-python>=1.2.0",
+    "pytz"
 ]
 [project.urls]
 "Homepage" = "https://github.com/Alex-Shur/bn_quik"
@@ -30,6 +31,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 exclude = [
     "examples/",
+    "lua/",
     ".gitignore",
     ".git/",
     "requirements.txt",

@@ -1,2 +1,3 @@
 backtrader-next>=2.3.2
 quik-python>=1.2.0
+pytz

@@ -8,15 +8,51 @@
 [![License](https://img.shields.io/github/license/Alex-Shur/bn_quik?color=9c2400)](https://github.com/Alex-Shur/bn_quik/blob/master/LICENSE)
 </div>
 
-Live trading intergartion of backtrader-next with QUIK trade terminal
+Интеграция [Backtrader-Next](https://github.com/smalinin/backtrader_next) с торговым терминалом QUIK для реальной торговли
+
 
 Установка
 ================
+Внимание для работы **bn_quik** необходимо в торговом терминале QUIK установить и запустить Lua коннектор.
 ```
 pip install bn_quik
 ```
 
-Использование
+Параметры объектов
+================
+
+#### QuikStore
+|Параметр| Значение по умолчанию | Обязательный |  |
+|---|---|---|---|
+|trade_account_id|  | Да | Торговый счет
+|client_code_for_orders| | Да(для Finam) | Номер торгового терминала. У брокера Финам требуется для совершения торговых операций|
+|host| "127.0.0.1"|  | Host с Quik Lua коннектором|
+|port| 34130 |  | |
+|lots| True | | # Входящий остаток в лотах (задается брокером)
+|limit_kind| 1 | | Основной режим торгов T1 (Для Demo Quik -1)
+|currency| "SUR" | |  Валюта |
+|futures_firm_id| "SPBFUT"| | Идентификатор фирмы для фьючерсов|
+|edp| False| | Единая денежная позиция
+|slippage_steps| 10 |  | Кол-во шагов цены для проскальзывания, для рыночных ордеров
+|data_dir| "DataQuik" | |  Каталог для хранения данных, свечные данные тикеров и состояние объекта Broker с ордерами
+----
+
+#### QuikData
+|Параметр| Значение по умолчанию | Обязательный |  |
+|---|---|---|---|
+|drop_price_doji| True | |  False - не пропускать дожи 4-х цен, True - пропускать
+|live_bars| False | | False - только история, True - история и новые бары
+|count| 2000 | | Количество запрашиваемых исторических баров по умолчанию
+
+Как получить Demo доступ к Quik
+================
+Демо доступ можно получить на сервере [ARQA](https://arqatech.com/ru/support/demo/)
+
+Примеры использования коннектора 
+================
+Все примеры находятся в папке **examples**
+
+Использование Lua коннектора
 ================
 Cкопировать содержимое папки **lua** c [GIT репозитария](https://github.com/Alex-Shur/bn_quik) 
 в отдельную папку, которая будет доступна приложению QUIK.
