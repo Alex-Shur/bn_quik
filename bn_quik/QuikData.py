@@ -55,9 +55,6 @@ class QuikData(with_metaclass(MetaQuikData, AbstractDataBase)):
         self.last_bar_received = False  # Получен последний бар
         self.live_mode = False  # Режим получения баров. False = История, True = Новые бары
         self.info = {}
-        # check if dir exists
-        if not os.path.exists(self.store.data_path):
-            os.makedirs(self.store.data_path)
 
     @property
     def data_id(self):

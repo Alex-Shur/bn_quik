@@ -1,6 +1,7 @@
 import logging
 import collections
 import os
+import sys
 import threading
 import asyncio
 import atexit
@@ -184,7 +185,18 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         self.qdata_last = defaultdict(QuikData)
         self.notifs = collections.deque()  # store notifications for cerebro
         self.tz_msk = timezone('Europe/Moscow')  # ВременнАя зона МСК
-        self.data_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', self.p.data_dir, '')  # Путь сохранения файла истории
+
+        app_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        # Проверяем, является ли data_dir относительным или абсолютным путем
+        if os.path.isabs(self.p.data_dir):
+            # Абсолютный путь - проверяем его существование
+            self.data_path = os.path.join(self.p.data_dir, '')
+            if not os.path.exists(self.data_path):
+                raise RuntimeError(f"Data directory does not exist: {self.data_path}")
+        else:
+            # Относительный путь - создаем его относительно приложения
+            self.data_path = os.path.join(app_dir, self.p.data_dir, '')
+            os.makedirs(self.data_path, exist_ok=True)
 
         self.new_bars = []  # Новые бары по всем подпискам на тикеры из QUIK
 
