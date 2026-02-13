@@ -70,26 +70,28 @@ class MetaSingleton(MetaParams):
 
     def run_sync(cls, coro):
         """Безопасно запускает корутину в любом контексте."""
+        # Пытаемся получить текущий running loop в текущем потоке
         try:
-            # Пытаемся получить текущий running loop
             loop = asyncio.get_running_loop()
-            # Мы уже в асинхронном контексте → используем run_coroutine_threadsafe
-            if loop == cls._loop:
-                # We're in the same loop thread, can't use run_until_complete
-                future = asyncio.ensure_future(coro, loop=loop)
-                # This shouldn't happen in normal flow
-                raise RuntimeError("Cannot run_sync from within the async loop thread")
-            else:
-                # Different loop - use threadsafe
-                future = asyncio.run_coroutine_threadsafe(coro, cls._loop)
-                return future.result()
         except RuntimeError:
-            # Нет активного event loop в текущем потоке → используем наш loop с threadsafe
-            if cls._loop is None or not cls._loop.is_running():
-                raise RuntimeError("Event loop is not running")
+            loop = None
 
+        if loop is not None:
+            # Мы уже в асинхронном контексте
+            if loop == cls._loop:
+                # We're in the same loop thread, can't use run_coroutine_threadsafe().result()
+                raise RuntimeError("Cannot run_sync from within the async loop thread")
+
+            # Different loop - use threadsafe
             future = asyncio.run_coroutine_threadsafe(coro, cls._loop)
             return future.result()
+
+        # Нет активного event loop в текущем потоке → используем наш loop с threadsafe
+        if cls._loop is None or not cls._loop.is_running():
+            raise RuntimeError("Event loop is not running")
+
+        future = asyncio.run_coroutine_threadsafe(coro, cls._loop)
+        return future.result()
 
     def run_async(cls, coro):
         """Запускает корутину без ожидания результата."""
@@ -166,11 +168,15 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
     @classmethod
     def getdata(cls, *args, **kwargs):
         '''Returns ``DataCls`` with args, kwargs'''
+        if cls.DataCls is None:
+            raise RuntimeError('DataCls is not registered')
         return cls.DataCls(*args, **kwargs)
 
     @classmethod
     def getbroker(cls, *args, **kwargs):
         '''Returns broker with *args, **kwargs from registered ``BrokerCls``'''
+        if cls.BrokerCls is None:
+            raise RuntimeError('BrokerCls is not registered')
         return cls.BrokerCls(*args, **kwargs)
 
     def __init__(self):
@@ -197,6 +203,8 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             # Относительный путь - создаем его относительно приложения
             self.data_path = os.path.join(app_dir, self.p.data_dir, '')
             os.makedirs(self.data_path, exist_ok=True)
+        self.logger.info("===========================")
+        self.logger.info("Data path: %s", self.data_path)
 
         self.new_bars = []  # Новые бары по всем подпискам на тикеры из QUIK
 
@@ -219,7 +227,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         
         self._lock_qdata = threading.RLock()        # Гибридный: Async(_on_new_candle/_register_data/_unregister_data) + может быть sync доступ
         self._lock_notifs = threading.Lock()        # Гибридный: Sync(get_notifications/put_notification) + может быть async
-        self._lock_accounts = threading.Lock()      # Только Async: get_accounts (но может расшириться)
+        self._lock_accounts = None                  # Только Async: get_accounts. Инициализируется как asyncio.Lock в _start_async
         self.lock_store_data = threading.RLock()   # Гибридный: Используется в QuikBroker для критических операций с данными
         
         # Примечание: threading.Lock безопасен в данной архитектуре благодаря отдельному потоку для event loop.
@@ -233,12 +241,10 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             if self._started:
                 self.logger.info("QuikStore: автоматическое завершение при выходе из программы")
                 self.stop()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # Игнорируем ошибки при завершении
         finally:
             # Принудительное завершение для гарантии
-            import sys
-            import os
             os._exit(0)  # Принудительно завершаем процесс
 
     def __del__(self):
@@ -246,7 +252,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         try:
             if self._started:
                 self.stop()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # Игнорируем ошибки в деструкторе
 
     @property
@@ -276,7 +282,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.broker = broker
 
         self._stop_event.clear()  # Сбрасываем флаг остановки
-        self.logger.info("Starting QuikStore...")
+        self.logger.debug("Starting QuikStore...")
         self._qapi_task = self.__class__.run_sync(self._start_async())
         self._started = True
         self.logger.info("QuikStore initialized and ready")
@@ -300,7 +306,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         # Закрываем соединение с QUIK
         try:
             self.quik_api.disconnect()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error closing connection to QUIK: %s", e)
 
         # Останавливаем event loop
@@ -317,9 +323,13 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
 
     async def _start_async(self):
         """Start the asynchronous event loop for the provider."""
+        # Инициализируем asyncio.Lock для _lock_accounts в контексте event loop
+        if self._lock_accounts is None:
+            self._lock_accounts = asyncio.Lock()
+        
         try:
             await self.quik_api.initialize()
-            self.logger.info("QUIK initialized successfully")
+            self.logger.debug("QUIK initialized successfully")
 
             if not self.quik_api.is_service_alive():
                 raise RuntimeError("Не удалось подключиться к QUIK")
@@ -328,7 +338,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             if not status:
                 raise RuntimeError("Quik не подключен к торгам")
 
-            self.logger.info("QUIK connected successfully")
+            self.logger.debug("QUIK connected successfully")
 
             self.quik_api.candles.add_new_candle_handler(self._on_new_candle)
             self.quik_api.events.add_on_connected(self._on_connected)
@@ -338,15 +348,15 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             self.quik_api.events.add_on_order(self._on_order)
             self.quik_api.events.add_on_stop_order(self._on_stop_order)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Ошибка подключения: %s", e)
             raise RuntimeError(f"Ошибка подключения: {e}") from e
         finally:
-            self.logger.info("QUIK _start_async ended")
+            self.logger.debug("QUIK _start_async ended")
 
     def _on_new_candle(self, candle: Candle):
         """Callback for new candle events"""
-        logging.debug("New candle received: %s.%s Interval: %s Time: %s", candle.class_code, candle.sec_code, candle.interval, candle.datetime.to_datetime())
+        self.logger.debug("Новая свеча получена: %s.%s Интервал: %s Время: %s", candle.class_code, candle.sec_code, candle.interval, candle.datetime.to_datetime())
         data_id = self._get_data_id(candle.class_code, candle.sec_code, candle.interval)
         with self._lock_qdata:
             qdata = self.qdata.get(data_id, None)
@@ -373,7 +383,6 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         # self.logger.info(stop_order)
         if self.broker:
             await self.broker.on_stop_order(stop_order)
-            pass
 
     async def _on_trade(self, trade: Trade):
         # self.logger.debug(trade)
@@ -407,36 +416,36 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
 
     def _subscribe_to_candles(self, class_code: str, sec_code: str, interval: CandleInterval)-> bool:
         """Подписка на новые бары по тикеру и временному интервалу"""
-        self.logger.debug("Subscribing to candles for %s.%s at interval %s", class_code, sec_code, interval)
+        self.logger.debug("Подписка на новые бары для %s.%s с интервалом %s", class_code, sec_code, interval)
         try:
             self.__class__.run_sync(self.quik_api.candles.subscribe(class_code, sec_code, interval))
             return True
-        except Exception as e:
-            self.logger.error("Error subscribing to candles: %s", e)
+        except Exception as e:  # noqa: BLE001
+            self.logger.error("Ошибка при подписке на новые бары: %s", e)
             return False
 
     def _unsubscribe_from_candles(self, class_code: str, sec_code: str, interval: CandleInterval)-> bool:
         """Отписка от новых баров по тикеру и временному интервалу"""
-        self.logger.debug("Unsubscribing from candles for %s.%s at interval %s", class_code, sec_code, interval)
+        self.logger.debug("Отписка от новых баров для %s.%s с интервалом %s", class_code, sec_code, interval)
         try:
             self.__class__.run_sync(self.quik_api.candles.unsubscribe(class_code, sec_code, interval))
             return True
-        except Exception as e:
-            self.logger.error("Error unsubscribing from candles: %s", e)
+        except Exception as e:  # noqa: BLE001
+            self.logger.error("Ошибка при отписке от новых баров: %s", e)
             return False
 
     def _is_subscribed_to_candles(self, class_code: str, sec_code: str, interval: CandleInterval)-> bool:
-        self.logger.debug("Checking subscription to candles for %s.%s at interval %s", class_code, sec_code, interval)
+        self.logger.debug("Проверка подписки на новые бары для %s.%s с интервалом %s", class_code, sec_code, interval)
         try:
             return self.__class__.run_sync(self.quik_api.candles.is_subscribed(class_code, sec_code, interval))
-        except Exception as e:
-            self.logger.error("Error checking subscription to candles: %s", e)
+        except Exception as e:  # noqa: BLE001
+            self.logger.error("Ошибка при проверке подписки на новые бары: %s", e)
             return False
 
 
     def _get_last_candles(self, class_code: str, sec_code: str, interval: CandleInterval, count:int = 1000) -> pd.DataFrame | None:
         """Получение последних баров по тикеру и временному интервалу"""
-        self.logger.debug("Getting last %s candles for %s.%s at interval %s", count, class_code, sec_code, interval)
+        self.logger.debug("Получение последних %s баров для %s.%s с интервалом %s", count, class_code, sec_code, interval)
         try:
             candles = self.__class__.run_sync(self.quik_api.candles.get_last_candles(class_code, sec_code, interval, count))
             df = pd.DataFrame({
@@ -450,23 +459,23 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
             })
             df.set_index('datetime', inplace=True)
             return df
-        except Exception as e:
-            self.logger.error("Error getting last candles: %s", e)
+        except Exception as e:  # noqa: BLE001
+            self.logger.error("Ошибка при получении последних баров: %s", e)
             return None
 
     async def _get_trade_accounts(self) -> list[TradeAccounts]:
         """Получение информации о торговых счетах из QUIK"""
-        self.logger.debug("Getting trade accounts")
+        self.logger.debug("Получение информации о торговых счетах из QUIK")
         try:
             return await self.quik_api.clazz.get_trade_accounts()
-        except Exception as e:
-            self.logger.error("Error getting trade accounts: %s", e)
+        except Exception as e:  # noqa: BLE001
+            self.logger.error("Ошибка при получении информации о торговых счетах: %s", e)
             return []
 
     async def get_ticker_info(self, class_code: str, sec_code: str) -> SecurityInfo | None:
         """Получение информации о тикере из QUIK"""
+        self.logger.debug("Получение информации о тикере для %s.%s", class_code, sec_code)
         key = (class_code, sec_code)
-        self.logger.debug("Getting ticker info for %s.%s", class_code, sec_code)
         val = self._ticker_info.get(key, None)
         if val is not None:
             return val
@@ -476,13 +485,14 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                 if val is not None:
                     self._ticker_info[key] = val
                 return val
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 self.logger.error("Error getting ticker info: %s", e)
                 self._ticker_info[key] = None
                 return None
 
     def get_ticker_info_sync(self, class_code: str, sec_code: str) -> dict:
         """Синхронное получение информации о тикере из QUIK"""
+        self.logger.debug("Получение информации о тикере для %s.%s", class_code, sec_code)
         info = QuikStore.run_sync(self.get_ticker_info(class_code, sec_code))
         return info.to_dict() if info else {}
     
@@ -490,7 +500,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         self.logger.debug("Getting extended portfolio info for %s.%s", firm_id, client_code)
         try:
             return await self.quik_api.trading.get_portfolio_info_ex(firm_id, client_code)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting extended portfolio info: %s", e)
             return None
 
@@ -499,73 +509,81 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         self.logger.debug("Getting extended ticker info for %s.%s %s", class_code, sec_code, param_name)
         try:
             return await self.quik_api.trading.get_param_ex(class_code, sec_code, param_name)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting extended ticker info: %s", e)
             return None
 
     async def get_all_depo_limits(self) -> List[DepoLimitEx]:
         """Получение всех лимитов по бумагам из QUIK"""
+        self.logger.debug("Получение всех лимитов по бумагам из QUIK")
         try:
             return await self.quik_api.trading.get_depo_limits()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting all depo limits: %s", e)
             return []
 
     async def get_money_limits(self) -> List[MoneyLimitEx]:
         """Получение всех лимитов по деньгам из QUIK"""
+        self.logger.debug("Получение всех лимитов по деньгам из QUIK")
         try:
             return await self.quik_api.trading.get_money_limits()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting all money limits: %s", e)
             return []
 
     async def get_futures_limit(self, firm_id: str, acc_id: str, curr_code: str = "") -> FuturesLimits | None:
         """Получение всех лимитов по фьючерсам из QUIK"""
+        self.logger.debug("Получение всех лимитов по фьючерсам из QUIK")
         try:
             return await self.quik_api.trading.get_futures_limit(firm_id, acc_id, FuturesLimitType.MONEY, curr_code)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting futures limits: %s", e)
             return None
 
     async def get_orders(self) -> list[Order]:
         """Получение всех заявок из QUIK"""
+        self.logger.debug("Получение всех заявок из QUIK")
         try:
             return await self.quik_api.orders.get_orders()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting orders: %s", e)
             return []
 
     async def get_stop_orders(self) -> list[StopOrder]:
         """Получение всех стоп-заявок из QUIK"""
+        self.logger.debug("Получение всех стоп-заявок из QUIK")
         try:
             return await self.quik_api.stop_orders.get_stop_orders()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting stop orders: %s", e)
             return []
 
     async def get_order_by_number(self, order_num:int) -> Order | None:
         """Получение информации о заявке по её номеру"""
+        self.logger.debug("Получение информации о заявке по её номеру: %s", order_num)
         try:
             return await self.quik_api.orders.get_order_by_number(order_num)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting order by number: %s", e)
             return None
 
     async def get_futures_client_holdings(self) -> list[FuturesClientHolding]:
         """Получение всех позиций по фьючерсам из QUIK"""
+        self.logger.debug("Получение всех позиций по фьючерсам из QUIK")
         try:
             return await self.quik_api.trading.get_futures_client_holdings()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error("Error getting futures client holdings: %s", e)
             return []
 
     def _get_quik_datetime_now(self) -> datetime | None:
         """Получение текущей даты и времени из QUIK"""
+        self.logger.debug("Получение текущей даты и времени из QUIK")
         try:
             dt = self.__class__.run_sync(self.quik_api.service.get_info_param("TRADEDATE"))
             tm = self.__class__.run_sync(self.quik_api.service.get_info_param("SERVERTIME"))
             return self._parse_datetime_auto(f'{dt} {tm}')
-        except Exception:
+        except Exception:  # noqa: BLE001
             return datetime.now(self.tz_msk).replace(tzinfo=None)  # То время МСК получаем из локального времени
 
     def _parse_datetime_auto(self, datetime_str: str) -> datetime:
@@ -681,16 +699,20 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
 
     async def send_transaction(self, transaction) -> int:
         """Отправка транзакции в QUIK"""
+        self.logger.debug("Отправка транзакции в QUIK: %s", transaction)
         try:
             trans_id = await self.quik_api.trading.send_transaction(transaction)
             return trans_id
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.logger.error('Error sending transaction: %s', e)
             return -1
 
     async def get_accounts(self) -> list[Account]:
         """Получение списка счетов"""
-        with self._lock_accounts:
+        self.logger.debug("Получение списка счетов")
+        if self._lock_accounts is None:
+            self._lock_accounts = asyncio.Lock()
+        async with self._lock_accounts:
             if not self._accounts:
                 money_limits:MoneyLimitEx = await self.get_money_limits()
                 if len(money_limits) == 0:
@@ -707,11 +729,12 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
                             )
                         acc_info.futures = ('SPBFUT' in class_codes) or (acc.firm_id == self.p.futures_firm_id)
                         self._accounts.append(acc_info)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     self.logger.error('get_accounts: Ошибка получения списка счетов: %s', e)
             return self._accounts
 
     async def get_last_price(self, class_code: str, sec_code: str) -> float | None:
+        self.logger.debug("Получение последней цены для %s.%s", class_code, sec_code)
         with self._lock_qdata:
             data = self.qdata_last.get((class_code, sec_code), None)
         if data and len(data):
@@ -722,6 +745,7 @@ class QuikStore(with_metaclass(MetaSingleton, object)):
         return None
 
     async def _get_step_price(self, class_code: str, sec_code: str) -> float | None:
+        self.logger.debug("Получение шага цены для %s.%s", class_code, sec_code)
         key = (class_code, sec_code)
         step_price = None
         if key in self._ticker_stepprice:

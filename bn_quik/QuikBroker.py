@@ -126,13 +126,15 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
     def buy(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None, tradeid=0, oco=None, trailamount=None, trailpercent=None, parent=None, transmit=True, **kwargs):
         """Заявка на покупку"""
         order = QuikStore.run_sync(self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, True, **kwargs))
-        self.notifs.append(order.clone())  # Уведомляем брокера об отправке новой заявки на покупку на биржу
+        with self._lock_notifs:
+            self.notifs.append(order.clone())  # Уведомляем брокера об отправке новой заявки на покупку на биржу
         return order
 
     def sell(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None, tradeid=0, oco=None, trailamount=None, trailpercent=None, parent=None, transmit=True, **kwargs):
         """Заявка на продажу"""
         order = QuikStore.run_sync(self.create_order(owner, data, size, price, plimit, exectype, valid, oco, parent, transmit, False, **kwargs))
-        self.notifs.append(order.clone())  # Уведомляем брокера об отправке новой заявки на продажу на биржу
+        with self._lock_notifs:
+            self.notifs.append(order.clone())  # Уведомляем брокера об отправке новой заявки на продажу на биржу
         return order
 
     def cancel(self, order):
@@ -193,7 +195,8 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             if not parent:  # Для обычных заявок
                 return await self.place_order(order)  # Отправляем заявку на биржу
             else:  # Если последняя заявка в цепочке родительской/дочерних заявок
-                self.notifs.append(order.clone())  # Удедомляем брокера о создании новой заявки
+                with self._lock_notifs:
+                    self.notifs.append(order.clone())  # Удедомляем брокера о создании новой заявки
                 return await self.place_order(order.parent)  # Отправляем родительскую заявку на биржу
 
         # Если не последняя заявка в цепочке родительской/дочерних заявок (transmit=False)
@@ -328,23 +331,38 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         Проверка связанных заявок
         Проверка родительской/дочерних заявок
         """
-        for order_ref, oco_ref in self.ocos.items():  # Пробегаемся по списку связанных заявок
-            if oco_ref == order.ref:  # Если в заявке номер эта заявка указана как связанная (по номеру транзакции)
-                await self.cancel_order(self.orders[order_ref])  # то отменяем заявку
-        if order.ref in self.ocos.keys():  # Если у этой заявки указана связанная заявка
-            oco_ref = self.ocos[order.ref]  # то получаем номер транзакции связанной заявки
-            await self.cancel_order(self.orders[oco_ref])  # отменяем связанную заявку
+        oco_orders_to_cancel = []
+        children_to_place = []
+        children_to_cancel = []
 
-        if not order.parent and not order.transmit and order.status == Order.Completed:  # Если исполнена родительская заявка
-            pcs = self.pcs[order.ref]  # Получаем очередь родительской/дочерних заявок
-            for child in pcs:  # Пробегаемся по всем заявкам
-                if child.parent:  # Пропускаем первую (родительскую) заявку
-                    await self.place_order(child)  # Отправляем дочернюю заявку на биржу
-        elif order.parent:  # Если исполнена/отменена дочерняя заявка
-            pcs = self.pcs[order.parent.ref]  # Получаем очередь родительской/дочерних заявок
-            for child in pcs:  # Пробегаемся по всем заявкам
-                if child.parent and child.ref != order.ref:  # Пропускаем первую (родительскую) заявку и исполненную заявку
-                    await self.cancel_order(child)  # Отменяем дочернюю заявку
+        with self._lock_orders:
+            for order_ref, oco_ref in self.ocos.items():  # Пробегаемся по списку связанных заявок
+                if oco_ref == order.ref and order_ref in self.orders:  # Если в заявке номер эта заявка указана как связанная (по номеру транзакции)
+                    oco_orders_to_cancel.append(self.orders[order_ref])
+
+            oco_ref = self.ocos.get(order.ref)
+            if oco_ref is not None and oco_ref in self.orders:  # Если у этой заявки указана связанная заявка
+                oco_orders_to_cancel.append(self.orders[oco_ref])  # получаем и отменяем связанную заявку
+
+            if not order.parent and not order.transmit and order.status == Order.Completed:  # Если исполнена родительская заявка
+                pcs = list(self.pcs[order.ref])  # Получаем очередь родительской/дочерних заявок
+                for child in pcs:  # Пробегаемся по всем заявкам
+                    if child.parent:  # Пропускаем первую (родительскую) заявку
+                        children_to_place.append(child)
+            elif order.parent:  # Если исполнена/отменена дочерняя заявка
+                pcs = list(self.pcs[order.parent.ref])  # Получаем очередь родительской/дочерних заявок
+                for child in pcs:  # Пробегаемся по всем заявкам
+                    if child.parent and child.ref != order.ref:  # Пропускаем первую (родительскую) заявку и исполненную заявку
+                        children_to_cancel.append(child)
+
+        for linked_order in oco_orders_to_cancel:
+            await self.cancel_order(linked_order)  # то отменяем заявку
+
+        for child in children_to_cancel:
+            await self.cancel_order(child)  # Отменяем дочернюю заявку
+
+        for child in children_to_place:
+            await self.place_order(child)  # Отправляем дочернюю заявку на биржу
 
 
     async def on_trans_reply(self, data: TransactionReply):
@@ -426,7 +444,8 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             order: Order = self.orders[trans_id]
         order.addinfo(order_num=order_num)  # Сохраняем номер заявки на бирже (может быть переход от стоп заявки к лимитной с изменением номера на бирже)
         self._save_broker_state()
-        self.logger.debug('on_trade: Заявка %s с номером %s. Номер транзакции %s. Номер сделки %s order=%s', order.ref, order_num, trans_id, trade_num, order)
+        self.logger.debug('on_trade: Заявка=%s с номером=%s. Номер транзакции=%s. Номер сделки=%s OrdType=%s Status=%s Alive=%s',
+                            order.ref, order_num, trans_id, trade_num, order.ordtypename(), order.getstatusname(), order.alive())
         class_code = qk_trade.class_code  # Код режима торгов
         sec_code = qk_trade.sec_code  # Код тикера
         dataname = self.store.get_ticker_name(class_code, sec_code)
@@ -434,7 +453,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         # Используем asyncio.Lock для оптимальной работы в async контексте
         async with self._lock_trades:
             if trade_num in self.trade_nums[dataname]:  # Если номер сделки есть в списке (фильтр для дублей)
-                self.logger.debug('on_trade: Заявка %s. Номер сделки %s есть в списке сделок (дубль). Выход', order.ref, trade_num)
+                self.logger.debug('on_trade: Заявка=%s. Номер сделки=%s есть в списке сделок (дубль). Выход', order.ref, trade_num)
                 return
             else:  # Если номер сделки новый
                 self.trade_nums[dataname].add(trade_num)  # Запоминаем номер сделки по тикеру, чтобы в будущем ее не обрабатывать (фильтр для дублей)
@@ -471,9 +490,11 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
             self.logger.debug('on_trade: Заявка %s. Проверка связанных и родительских/дочерних заявок', order.ref)
             await self.oco_pc_check(order)  # Проверяем связанные и родительскую/дочерние заявки (Completed)
         self.logger.debug('on_trade: Заявка %s. Выход', order.ref)
+        _cash = await self._getcash()
+        _value = await self._getvalue(None)
         with self._lock_cash:
-            self.cash = await self._getcash()
-            self.value = await self._getvalue(None)
+            self.cash = _cash
+            self.value = _value
 
 
     async def on_order(self, order : QuikOrder):
@@ -545,18 +566,20 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         """
         value = 0.0
         with self._lock_positions:
-            for ticker_name, position in self._positions.items():
-                if datas and not any(data.p.dataname == ticker_name for data in datas):
-                    continue
-                class_code, sec_code = await self.store.parse_ticker_name(ticker_name)
-                last_price =  await self.store.get_last_price(class_code, sec_code)
-                if last_price:
-                    last_price = await self.store.quik_price_to_SUR(class_code, sec_code, last_price)
-                    value += position.size * last_price
+            positions_items = list(self._positions.items())
+        for ticker_name, position in positions_items:
+            if datas and not any(data.p.dataname == ticker_name for data in datas):
+                continue
+            class_code, sec_code = await self.store.parse_ticker_name(ticker_name)
+            last_price =  await self.store.get_last_price(class_code, sec_code)
+            if last_price:
+                last_price = await self.store.quik_price_to_SUR(class_code, sec_code, last_price)
+                value += position.size * last_price
         return value
 
     async def _load_all_orders(self):
         """Получение всех активных заявок по счету"""
+        self.logger.debug('_load_all_orders: Получение всех активных заявок по счету')
         orders = self._load_broker_state()
         if orders is None:
             return
@@ -564,7 +587,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
         stop_ord_list = await self.store.get_stop_orders()
         founded = set()
         for o in ord_list:
-            self.logger.debug('Active Order: %s', str(o))
+            self.logger.debug('Check Order: trans_id = %s', o.trans_id)
             str_trans_id = str(o.trans_id)
             if str_trans_id in orders:
                 order: Order = orders[str_trans_id]
@@ -585,7 +608,7 @@ class QuikBroker(with_metaclass(MetaQuikBroker, BrokerBase)):
                 founded.add(str_trans_id)
 
         for o in stop_ord_list:
-            self.logger.debug('Active Stop Order: %s', str(o))
+            self.logger.debug('Check Stop Order: trans_id = %s', o.trans_id)
             str_trans_id = str(o.trans_id)
             if str_trans_id in orders:
                 order: Order = orders[str_trans_id]
