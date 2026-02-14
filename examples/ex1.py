@@ -18,7 +18,6 @@ class StratPrintBars(bt.Strategy):
     - Отображает статус перехода к новым барам
     """
     params = (  # Параметры торговой системы
-        ('name', None),  # Название торговой системы
         ('wait_all_datas', False),  # Ждать прихода баров всех тикеров перед обработкой
         ('symbols', None),  # Список торгуемых тикеров. По умолчанию торгуем все тикеры
     )
@@ -55,6 +54,7 @@ if __name__ == '__main__':
         # symbol = 'SPBFUT.SiZ5'  # Для фьючерсов: Si (RTS) - Z (December) - 5 (2025)
 
         store = QuikStore(trade_account_id='NL0011XXXXXX', limit_kind=-1) #  limit_kind=-1 - только для Demo Quik
+        # store = QuikStore(trade_account_id='NL0011XXXXXX') #  для реального счета 
         # store = QuikStore(trade_account_id='SPBFUT0XXXXX') # Срочный рынок
 
         cerebro = bt.Cerebro(quicknotify=True)
